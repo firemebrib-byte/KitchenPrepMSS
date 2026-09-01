@@ -11,7 +11,7 @@ import { useEffect, useState, useMemo, lazy, Suspense } from "react";
 import { FoodCategory, TargetGroup } from "./types/types.ts";
 import { PrepReportService } from "./services/store.ts";
 import { TableGrid } from "./components/inventory/TableGrid.tsx";
-import { LogBroker, computeLedgerDailyAmountsByGroup } from "./utils.ts";
+import { LogBroker, computeLedgerDailyAmountsByGroup, computeLedgerHistoricalInAmount } from "./utils.ts";
 import { ErrorBoundary } from "./components/shared/ErrorBoundary.tsx";
 import { useAppAuth } from "./hooks/useAppAuth.ts";
 import { useAppData } from "./hooks/useAppData.ts";
@@ -225,17 +225,13 @@ export default function App() {
   }, [selectedYear, selectedMonth, ledgerItemsList]);
 
   /**
-   * @description 计算原料购销台账所有原料的累计入库总额 (全账期)
+   * @description 计算原料购销台账所有原料的累计入库总额 (全账期)。
+   * 走服务端预聚合的 historicalTotalInAmount（见 utils.computeLedgerHistoricalInAmount），
+   * 不再对内存里的 dailyRecords 求和——否则未提前切换过其它月份时，内存只有当月数据，
+   * “全部”会退化成只等于“本月”。
    */
   const allLedgersTotalAmount = useMemo(() => {
-    return ledgerItemsList.reduce((sum, item) => {
-      if (item.ledgerId !== appActiveLedgerId) return sum;
-      let itemSum = 0;
-      Object.values(item.dailyRecords || {}).forEach((record: any) => {
-        itemSum += record.inAmount || 0;
-      });
-      return sum + itemSum;
-    }, 0);
+    return computeLedgerHistoricalInAmount(ledgerItemsList, appActiveLedgerId);
   }, [ledgerItemsList, appActiveLedgerId]);
 
   /**

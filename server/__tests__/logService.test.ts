@@ -22,7 +22,7 @@ beforeEach(async () => {
   process.env.LOCAL_LOG_DIR = path.join(tmpDir, "logs");
   process.env.LOG_MAX_FILE_SIZE_MB = "0.001"; // 约 1KB，便于用极少量日志行就能触发滚动测试
   vi.resetModules();
-  const mod = await import("./logService.ts");
+  const mod = await import("../logService.ts");
   LogService = mod.LogService;
 });
 
@@ -54,7 +54,7 @@ describe("LogService", () => {
         fs.writeFileSync(legacyPath, "legacy log content\n");
 
         vi.resetModules();
-        await import("./logService.ts");
+        await import("../logService.ts");
         const migratedPath = path.join(process.env.LOCAL_LOG_DIR!, "app-legacy-migrated.log");
 
         expect(fs.existsSync(migratedPath)).toBe(true);
@@ -77,7 +77,7 @@ describe("LogService", () => {
         fs.writeFileSync(legacyPath, "should stay untouched");
 
         vi.resetModules();
-        await import("./logService.ts");
+        await import("../logService.ts");
 
         // 既然迁移目标已存在，源文件不应被二次搬动，保持原样
         expect(fs.existsSync(legacyPath)).toBe(true);

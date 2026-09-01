@@ -93,6 +93,8 @@ export interface LedgerItem {
   historicalTotalIn?: number;
   /** 服务端预计算的该原料所有的历史累计出库总量（不受前端拉取的月份日期区间影响） */
   historicalTotalOut?: number;
+  /** 服务端预计算的该原料所有的历史累计入库金额（对全部逐日流水 inAmount 求和，不受前端拉取的月份日期区间影响） */
+  historicalTotalInAmount?: number;
   /** 每日出入库及明细记录，以 YYYY-MM-DD 为 Key 进行索引 */
   dailyRecords: Record<string, DailyStockRecord>;
 }

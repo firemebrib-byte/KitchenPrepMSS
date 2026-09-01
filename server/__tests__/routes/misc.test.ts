@@ -22,7 +22,7 @@ beforeEach(async () => {
   process.env.LOCAL_LOG_DIR = path.join(tmpDir, "logs");
 
   vi.resetModules();
-  const { miscRouter } = await import("./misc.ts");
+  const { miscRouter } = await import("../../routes/misc.ts");
 
   app = express();
   app.use(express.json());

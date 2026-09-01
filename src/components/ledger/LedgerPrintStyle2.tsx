@@ -11,6 +11,7 @@ import { Ledger, LedgerItem } from "../../types/ledgerTypes.ts";
 import { FoodCategory } from "../../types/types.ts";
 import { LEDGER_PRINT_STYLE2_CONFIG } from "../../constants/ledgerConstants.ts";
 import { RawMaterialsDictService } from "../../services/rawMaterialDict.ts";
+import { computeLedgerDailyStockBalances } from "../../utils.ts";
 import { LedgerPrintStyle2Consumable } from "./LedgerPrintStyle2Consumable.tsx";
 
 /**
@@ -81,22 +82,10 @@ export function LedgerPrintStyle2({
   const hasConversion = !!(dictItem && dictItem.conversionUnit && dictItem.conversionRatio);
   const displayUnit = hasConversion ? dictItem!.conversionUnit : (dictItem?.unit || activeItem.unit);
 
-  // 累计每日结余，起初结余为早于 style2StartDate 的所有累计量
-  let tempStock = activeItem.initialStock || 0;
-  Object.entries(activeItem.dailyRecords).forEach(([dateKey, record]) => {
-    if (dateKey < style2StartDate) {
-      tempStock += (record.inQuantity || 0) - (record.outQuantity || 0);
-    }
-  });
-
-  const stockByDay: Record<string, number> = {};
-  style2DatesArray.forEach((dStr) => {
-    const rec = activeItem.dailyRecords[dStr];
-    if (rec) {
-      tempStock = tempStock + (rec.inQuantity || 0) - (rec.outQuantity || 0);
-    }
-    stockByDay[dStr] = Math.round(tempStock * 100) / 100;
-  });
+  // 当日结余库存：锚定在“真实当前库存”（基于服务端全历史累计的 historicalTotalIn/Out）上，不再从
+  // “早于 style2StartDate 的内存 dailyRecords”反推期初——跨月/跨区间打印时那些更早的记录会被按月懒加载
+  // 排除，导致结余算成错误的负数（见 utils.ts computeLedgerDailyStockBalances）。
+  const stockByDay = computeLedgerDailyStockBalances(activeItem, style2DatesArray);
 
   const activeDays = style2DatesArray.map((dStr) => {
     const record = activeItem.dailyRecords[dStr];

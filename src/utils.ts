@@ -63,6 +63,100 @@ export function computeLedgerDailyAmountsByGroup(
 }
 
 /**
+ * @description 计算某个台账原料项的“真实当前库存”（全历史累计口径），不受前端按月/按区间懒加载的影响。
+ * 优先使用服务端在 GET /api/storage/load 时预聚合的 historicalTotalIn/historicalTotalOut
+ * （本地 SQLite 模式下是对该原料全部逐日流水的无条件 SUM，与前端当前加载的月份区间无关）；
+ * 两字段缺失时（如 COS 模式返回的本就是完整 dailyRecords）退回按内存中现有 dailyRecords 求和。
+ * @param item 台账原料项（至少含 initialStock，理想情况下含 historicalTotalIn/Out）
+ * @returns 真实当前库存数量（保留两位小数）
+ */
+export function computeLedgerTrueCurrentStock(item: LedgerItem): number {
+  const initial = item.initialStock || 0;
+  const histIn = item.historicalTotalIn;
+  const histOut = item.historicalTotalOut;
+  if (
+    typeof histIn === "number" && Number.isFinite(histIn) &&
+    typeof histOut === "number" && Number.isFinite(histOut)
+  ) {
+    return Math.round((initial + histIn - histOut) * 100) / 100;
+  }
+  let sumIn = 0;
+  let sumOut = 0;
+  Object.values(item.dailyRecords || {}).forEach((r) => {
+    sumIn += r?.inQuantity || 0;
+    sumOut += r?.outQuantity || 0;
+  });
+  return Math.round((initial + sumIn - sumOut) * 100) / 100;
+}
+
+/**
+ * @description 计算单个台账原料项在给定连续日期区间内“每一天的当日结余库存”。
+ *
+ * 结余口径锚定在 computeLedgerTrueCurrentStock() 返回的“真实当前库存”上：区间最后一天的结余恒等于
+ * 真实当前库存，更早的日期按区间内每天的出入库变动逐日反推。因此无论选择哪个时间段展示或打印，都不会
+ * 因为区间外（尤其是更早月份）的入库/出库被按月懒加载排除在 dailyRecords 之外，而算出错误（甚至为负）
+ * 的库存。例如某原料 8 月入库 250 斤、9 月仅出库若干斤，切到 9 月查看时最后一天仍显示真实剩余库存，
+ * 而不是把 8 月的入库丢掉后得到的负数。
+ *
+ * @param item 台账原料项（需含 dailyRecords，理想情况下含 historicalTotalIn/Out）
+ * @param dates 升序排列的连续日期字符串数组（YYYY-MM-DD），通常由 getDatesBetween() 生成
+ * @returns 以日期字符串为键、当日结余库存为值的 Record
+ */
+export function computeLedgerDailyStockBalances(
+  item: LedgerItem,
+  dates: string[]
+): Record<string, number> {
+  const balances: Record<string, number> = {};
+  const trueCurrentStock = computeLedgerTrueCurrentStock(item);
+
+  // 区间内的出入库净变动合计
+  let windowIn = 0;
+  let windowOut = 0;
+  dates.forEach((d) => {
+    const r = item.dailyRecords?.[d];
+    if (r) {
+      windowIn += r.inQuantity || 0;
+      windowOut += r.outQuantity || 0;
+    }
+  });
+
+  // 反推“区间第一天之前”的期初结余：真实当前库存 − 区间净入库 + 区间净出库
+  let accum = Math.round((trueCurrentStock - windowIn + windowOut) * 100) / 100;
+  dates.forEach((dateStr) => {
+    const r = item.dailyRecords?.[dateStr];
+    accum = accum + (r?.inQuantity || 0) - (r?.outQuantity || 0);
+    balances[dateStr] = Math.round(accum * 100) / 100;
+  });
+
+  return balances;
+}
+
+/**
+ * @description 计算某本台账下全部原料的“全历史累计入库金额”（全部账期口径），不受前端按月懒加载的影响。
+ * 优先用服务端在 GET /api/storage/load 预聚合的 historicalTotalInAmount（对该原料全部逐日流水 inAmount 的
+ * 无条件 SUM，与前端当前加载的月份区间无关）；缺失时（如 COS 模式返回的本就是完整 dailyRecords）退回按内存中
+ * 现有 dailyRecords 求和。用于左侧边栏“台账原料累计入库”切到“全部”时，避免只统计到已切换浏览过的月份。
+ * @param ledgerItems 全部台账原料项目列表
+ * @param ledgerId 目标台账 ID（只统计 ledgerId 匹配的原料）
+ * @returns 该台账全历史累计入库金额（保留两位小数）
+ */
+export function computeLedgerHistoricalInAmount(ledgerItems: LedgerItem[], ledgerId: string): number {
+  let total = 0;
+  for (const item of ledgerItems) {
+    if (item.ledgerId !== ledgerId) continue;
+    const hist = item.historicalTotalInAmount;
+    if (typeof hist === "number" && Number.isFinite(hist)) {
+      total += hist;
+    } else {
+      Object.values(item.dailyRecords || {}).forEach((r) => {
+        total += r?.inAmount || 0;
+      });
+    }
+  }
+  return Math.round(total * 100) / 100;
+}
+
+/**
  * @description 获取两个日期之间的所有日期字符串数组 (格式: YYYY-MM-DD)
  * @param startDate 开始日期 (YYYY-MM-DD)
  * @param endDate 结束日期 (YYYY-MM-DD)

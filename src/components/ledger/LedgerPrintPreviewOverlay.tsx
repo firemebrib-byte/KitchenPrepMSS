@@ -125,7 +125,11 @@ export function LedgerPrintPreviewOverlay({
           activeLedger={activeLedger}
           activeItemId={activeItemId}
           selectedDate={selectedDate}
-          ledgerItems={ledgerItems}
+          /* 样式二按“采购流水时间段筛选”(style2StartDate~style2EndDate) 打印单个原料的逐日流水，
+             取料必须用未按 selectedDate 过滤的 currentLedgerItems —— 若沿用 ledgerItems(=sortedFilteredLedgerItems，
+             仅含在 selectedDate 当天有记录的原料)，当聚焦原料在时间段内有出入库、但恰好在 selectedDate 当天没有记录时，
+             会被过滤掉导致找不到 activeItem，预览错误地提示“请先选择需要打印的单原料明细”。 */
+          ledgerItems={currentLedgerItems}
           style2StartDate={style2StartDate}
           style2EndDate={style2EndDate}
           style2DatesArray={style2DatesArray}

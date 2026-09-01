@@ -782,10 +782,15 @@ export class StorageService {
 
     const ledgers = db.prepare("SELECT id, name, created_at as createdAt FROM ledgers").all();
 
+    // currentStock 一律由 initialStock + 全历史入库累计 − 全历史出库累计 现算，不读 li.current_stock 存量列：
+    // 存量列的维护历来只按“写操作发生当时前端加载的月份区间”重算，跨月编辑会写歪；这里以逐日流水表的无条件
+    // SUM 为准，使 GET /load 返回的 currentStock 永远是真实库存，并自动修复任何历史写歪的存量值。
     const ledgerItemsRaw = db.prepare(`
-      SELECT li.id, li.ledger_id as ledgerId, li.name, li.unit, li.spec, li.initial_stock as initialStock, li.current_stock as currentStock,
+      SELECT li.id, li.ledger_id as ledgerId, li.name, li.unit, li.spec, li.initial_stock as initialStock,
+             (li.initial_stock + COALESCE(SUM(dr.in_quantity), 0) - COALESCE(SUM(dr.out_quantity), 0)) as currentStock,
              COALESCE(SUM(dr.in_quantity), 0) as historicalTotalIn,
-             COALESCE(SUM(dr.out_quantity), 0) as historicalTotalOut
+             COALESCE(SUM(dr.out_quantity), 0) as historicalTotalOut,
+             COALESCE(SUM(dr.in_amount), 0) as historicalTotalInAmount
       FROM ledger_items li
       LEFT JOIN ledger_item_daily_records dr ON li.id = dr.item_id
       GROUP BY li.id
@@ -1213,16 +1218,20 @@ export class StorageService {
       const updatedLedger: Ledger = { ...ledgers[ledgerIndex], name: normalizedName };
       const ops: SyncOp[] = [{ entity: "ledger", op: "upsert", key: id, data: updatedLedger }];
 
+      // 台账 ↔ 一级人群通过 id/key 关联，历史上一律规范化为大写（见 saveGroup / generateDefaultSeeds）。
+      // 这里按大小写不敏感匹配（与 deleteLedger / deleteGroup 保持一致），命中则沿用人群原有 key 落 op、
+      // 不猜测重新大小写；未命中才补齐一份，用大写规范形，避免因大小写不匹配误判成“不存在”而写出重复人群行。
       const activeGroups: DynamicGroup[] = current.activeGroups ?? [];
-      const groupIndex = activeGroups.findIndex((g) => g.key === id);
-      if (groupIndex > -1) {
-        if (activeGroups[groupIndex].label !== normalizedName) {
-          ops.push({ entity: "activeGroup", op: "upsert", key: id, data: { ...activeGroups[groupIndex], label: normalizedName } });
+      const linkedGroup = activeGroups.find((g) => g.key.toUpperCase() === id.toUpperCase());
+      if (linkedGroup) {
+        if (linkedGroup.label !== normalizedName) {
+          ops.push({ entity: "activeGroup", op: "upsert", key: linkedGroup.key, data: { ...linkedGroup, label: normalizedName } });
         }
       } else {
         // 极端情形：台账存在但对应的餐位人群配置尚不存在，补齐一份，
         // 与迁移前 syncGroupFromLedger() 的"新建人群"分支保持一致（备餐报表双状态已随本次重构整体删除，不再需要补空报表）
-        ops.push({ entity: "activeGroup", op: "upsert", key: id, data: { key: id, label: normalizedName, emoji: "🍽️" } });
+        const canonicalKey = id.toUpperCase();
+        ops.push({ entity: "activeGroup", op: "upsert", key: canonicalKey, data: { key: canonicalKey, label: normalizedName, emoji: "🍽️" } });
       }
 
       const ok = await StorageService.saveInternal(ops);
@@ -1249,17 +1258,19 @@ export class StorageService {
         throw new Error("找不到待删除的台账");
       }
       const ledgerItems: LedgerItem[] = current.ledgerItems ?? [];
-      const removedItems = ledgerItems.filter((item) => item.ledgerId === id);
+      // 用命中的 ledger.id 作为关联键（而非路由传入的 id），避免大小写差异导致漏删子项 / 误删他人行
+      const removedItems = ledgerItems.filter((item) => item.ledgerId === ledger.id);
 
-      const ops: SyncOp[] = [{ entity: "ledger", op: "delete", key: id }];
+      const ops: SyncOp[] = [{ entity: "ledger", op: "delete", key: ledger.id }];
       removedItems.forEach((item) => {
         ops.push({ entity: "ledgerItem", op: "delete", key: item.id });
       });
 
-      const upperId = id.toUpperCase();
+      // 大小写不敏感匹配对应人群，删除时按人群实际行的 key 下 op（与 updateLedger / deleteGroup 一致）
       const activeGroups: DynamicGroup[] = current.activeGroups ?? [];
-      if (activeGroups.some((g) => g.key === upperId)) {
-        ops.push({ entity: "activeGroup", op: "delete", key: upperId });
+      const linkedGroup = activeGroups.find((g) => g.key.toUpperCase() === ledger.id.toUpperCase());
+      if (linkedGroup) {
+        ops.push({ entity: "activeGroup", op: "delete", key: linkedGroup.key });
       }
 
 
@@ -1334,19 +1345,29 @@ export class StorageService {
         throw new Error(`台账内已有名为 "${normalizedName}" 的原料`);
       }
       const initialStock = Math.max(0, input.initialStock);
-      let sumIn = 0;
-      let sumOut = 0;
-      Object.values(oldItem.dailyRecords ?? {}).forEach((record: any) => {
-        sumIn += record.inQuantity || 0;
-        sumOut += record.outQuantity || 0;
-      });
+      // 库存按全历史累计口径重算：本次只改基础信息、不动任何逐日流水，故直接沿用 readDataFromSqlite() 预聚合的
+      // historicalTotalIn/Out（对该原料全部逐日流水的无条件 SUM），不再对 oldItem.dailyRecords（仅含前端当前
+      // 加载的月份区间）逐日求和 —— 那样跨月编辑基础信息会把更早月份的出入库丢掉，算出错误的库存。
+      const historicalTotalIn = Number.isFinite(oldItem.historicalTotalIn as number)
+        ? (oldItem.historicalTotalIn as number)
+        : Object.values(oldItem.dailyRecords ?? {}).reduce((s: number, r: any) => s + (r.inQuantity || 0), 0);
+      const historicalTotalOut = Number.isFinite(oldItem.historicalTotalOut as number)
+        ? (oldItem.historicalTotalOut as number)
+        : Object.values(oldItem.dailyRecords ?? {}).reduce((s: number, r: any) => s + (r.outQuantity || 0), 0);
+      // 本次不动逐日流水，累计入库金额保持不变；沿用 readDataFromSqlite() 预聚合值，缺失时回退按内存求和
+      const historicalTotalInAmount = Number.isFinite(oldItem.historicalTotalInAmount as number)
+        ? (oldItem.historicalTotalInAmount as number)
+        : Object.values(oldItem.dailyRecords ?? {}).reduce((s: number, r: any) => s + (r.inAmount || 0), 0);
       const updatedItem: LedgerItem = {
         ...oldItem,
         name: normalizedName,
         unit: (input.unit ?? "").trim() || "斤",
         spec: (input.spec ?? "").trim() || "常规",
         initialStock,
-        currentStock: initialStock + sumIn - sumOut
+        historicalTotalIn,
+        historicalTotalOut,
+        historicalTotalInAmount,
+        currentStock: Math.round((initialStock + historicalTotalIn - historicalTotalOut) * 100) / 100
       };
       const ok = await StorageService.saveInternal([{ entity: "ledgerItem", op: "upsert", key: updatedItem.id, data: updatedItem }]);
       if (!ok) {
@@ -1506,17 +1527,44 @@ export class StorageService {
       updatedDailyRecords[dateStr] = mergedRecord;
     }
 
-    let sumIn = 0;
-    let sumOut = 0;
-    Object.values(updatedDailyRecords).forEach((record) => {
-      sumIn += record.inQuantity || 0;
-      sumOut += record.outQuantity || 0;
-    });
-    const newCurrentStock = item.initialStock + sumIn - sumOut;
+    // 库存按全历史累计口径重算，而不是对 updatedDailyRecords（仅含前端当前加载的月份区间）逐日求和 ——
+    // 否则跨月查看/编辑时会把更早月份的出入库整段丢掉，算出错误（甚至为负）的库存。
+    // readDataFromSqlite() 返回的 historicalTotalIn/Out 是对该原料全部逐日流水的无条件 SUM；这里按
+    // “旧值 − 本次该天的旧数量 + 本次该天的新数量”做增量调整，使其继续等于全历史累计。
+    // 注意：若正在编辑的 dateStr 落在写操作发生当时 load() 加载区间之外（如把 selectedDate 切到往月补录），
+    // oldRecord 会退化为全 0，本次 REST 响应里的库存/累计可能短暂偏差，但下一次 GET /load 会用逐日流水表的
+    // 无条件 SUM 重新算准（见 readDataFromSqlite），不会持久写歪。
+    const priorHistoricalTotalIn = Number.isFinite(item.historicalTotalIn as number)
+      ? (item.historicalTotalIn as number)
+      : Object.values(item.dailyRecords ?? {}).reduce((s, r) => s + (r.inQuantity || 0), 0);
+    const priorHistoricalTotalOut = Number.isFinite(item.historicalTotalOut as number)
+      ? (item.historicalTotalOut as number)
+      : Object.values(item.dailyRecords ?? {}).reduce((s, r) => s + (r.outQuantity || 0), 0);
+    // 累计入库金额同理按增量调整，供左侧边栏“台账原料累计入库 → 全部”统计（不受前端按月懒加载影响）
+    const priorHistoricalTotalInAmount = Number.isFinite(item.historicalTotalInAmount as number)
+      ? (item.historicalTotalInAmount as number)
+      : Object.values(item.dailyRecords ?? {}).reduce((s, r) => s + (r.inAmount || 0), 0);
+
+    const oldDayIn = oldRecord.inQuantity || 0;
+    const oldDayOut = oldRecord.outQuantity || 0;
+    const oldDayInAmount = oldRecord.inAmount || 0;
+    const newDayIn = mergedRecord.inQuantity || 0;
+    const newDayOut = mergedRecord.outQuantity || 0;
+    // hasData 为 false 时该天记录被删除，inQuantity 必为 0 ⇒ inAmount 也为 0，这里与 newDayIn/newDayOut 同口径
+    const newDayInAmount = mergedRecord.inAmount || 0;
+
+    const newHistoricalTotalIn = Math.round((priorHistoricalTotalIn - oldDayIn + newDayIn) * 100) / 100;
+    const newHistoricalTotalOut = Math.round((priorHistoricalTotalOut - oldDayOut + newDayOut) * 100) / 100;
+    const newHistoricalTotalInAmount = Math.round((priorHistoricalTotalInAmount - oldDayInAmount + newDayInAmount) * 100) / 100;
+    const newCurrentStock = Math.round((item.initialStock + newHistoricalTotalIn - newHistoricalTotalOut) * 100) / 100;
+
     const updatedItem: LedgerItem = {
       ...item,
       dailyRecords: updatedDailyRecords,
-      currentStock: Math.round(newCurrentStock * 100) / 100
+      historicalTotalIn: newHistoricalTotalIn,
+      historicalTotalOut: newHistoricalTotalOut,
+      historicalTotalInAmount: newHistoricalTotalInAmount,
+      currentStock: newCurrentStock
     };
 
     const ops: SyncOp[] = [];
@@ -1551,28 +1599,30 @@ export class StorageService {
       const current = await StorageService.load();
       const upperKey = key.trim().toUpperCase();
       const activeGroups: DynamicGroup[] = current.activeGroups ?? [];
-      const existingIndex = activeGroups.findIndex((g) => g.key === upperKey);
+      // 大小写不敏感匹配已有人群；命中则沿用其原有 key（不猜测重新大小写），未命中才用大写规范形新建
+      const existingIndex = activeGroups.findIndex((g) => g.key.toUpperCase() === upperKey);
+      const groupKey = existingIndex > -1 ? activeGroups[existingIndex].key : upperKey;
 
       const ops: SyncOp[] = [];
       let savedGroup: DynamicGroup;
       if (existingIndex > -1) {
         savedGroup = {
-          key: upperKey, label: label.trim(), emoji: emoji.trim() || "🍽️",
+          key: groupKey, label: label.trim(), emoji: emoji.trim() || "🍽️",
           isDefault: activeGroups[existingIndex].isDefault
         };
       } else {
-        savedGroup = { key: upperKey, label: label.trim(), emoji: emoji.trim() || "🍽️" };
+        savedGroup = { key: groupKey, label: label.trim(), emoji: emoji.trim() || "🍽️" };
       }
-      ops.push({ entity: "activeGroup", op: "upsert", key: upperKey, data: savedGroup });
+      ops.push({ entity: "activeGroup", op: "upsert", key: groupKey, data: savedGroup });
 
       const ledgers: Ledger[] = current.ledgers ?? [];
-      const existingLedger = ledgers.find((l) => l.id === upperKey);
+      const existingLedger = ledgers.find((l) => l.id.toUpperCase() === upperKey);
       if (existingLedger) {
         if (existingLedger.name !== label.trim()) {
-          ops.push({ entity: "ledger", op: "upsert", key: upperKey, data: { ...existingLedger, name: label.trim() } });
+          ops.push({ entity: "ledger", op: "upsert", key: existingLedger.id, data: { ...existingLedger, name: label.trim() } });
         }
       } else {
-        ops.push({ entity: "ledger", op: "upsert", key: upperKey, data: { id: upperKey, name: label.trim(), createdAt: new Date().toISOString() } });
+        ops.push({ entity: "ledger", op: "upsert", key: groupKey, data: { id: groupKey, name: label.trim(), createdAt: new Date().toISOString() } });
       }
 
       const ok = await StorageService.saveInternal(ops);
@@ -1600,14 +1650,15 @@ export class StorageService {
         throw new Error(`「${target.label}」是系统默认人群，不允许删除，如需调整可编辑其名称或图标`);
       }
 
-      const ops: SyncOp[] = [{ entity: "activeGroup", op: "delete", key: upperKey }];
+      // 按人群实际行的 key 下删除 op（命中时），而不是重新大写猜一个——避免历史上存在非大写 key 时删不掉
+      const ops: SyncOp[] = [{ entity: "activeGroup", op: "delete", key: target ? target.key : upperKey }];
 
       const ledgers: Ledger[] = current.ledgers ?? [];
       const ledger = ledgers.find((l) => l.id.toUpperCase() === upperKey);
       if (ledger) {
         ops.push({ entity: "ledger", op: "delete", key: ledger.id });
         const ledgerItems: LedgerItem[] = current.ledgerItems ?? [];
-        ledgerItems.filter((item) => item.ledgerId.toUpperCase() === upperKey).forEach((item) => {
+        ledgerItems.filter((item) => item.ledgerId.toUpperCase() === ledger.id.toUpperCase()).forEach((item) => {
           ops.push({ entity: "ledgerItem", op: "delete", key: item.id });
         });
       }
@@ -1637,12 +1688,14 @@ export class StorageService {
       const current = await StorageService.load();
       const upperKey = key.trim().toUpperCase();
       const activeCategories: DynamicCategory[] = current.activeCategories ?? [];
-      const existingIndex = activeCategories.findIndex((c) => c.key === upperKey);
+      // 大小写不敏感匹配已有大类；命中则沿用其原有 key，未命中才用大写规范形新建
+      const existingIndex = activeCategories.findIndex((c) => c.key.toUpperCase() === upperKey);
+      const categoryKey = existingIndex > -1 ? activeCategories[existingIndex].key : upperKey;
       const savedCategory: DynamicCategory = existingIndex > -1
-        ? { key: upperKey, label: label.trim(), isDefault: activeCategories[existingIndex].isDefault }
-        : { key: upperKey, label: label.trim() };
+        ? { key: categoryKey, label: label.trim(), isDefault: activeCategories[existingIndex].isDefault }
+        : { key: categoryKey, label: label.trim() };
 
-      const ok = await StorageService.saveInternal([{ entity: "activeCategory", op: "upsert", key: upperKey, data: savedCategory }]);
+      const ok = await StorageService.saveInternal([{ entity: "activeCategory", op: "upsert", key: categoryKey, data: savedCategory }]);
       if (!ok) {
         throw new Error("保存大类配置失败");
       }
@@ -1661,12 +1714,13 @@ export class StorageService {
       const current = await StorageService.load();
       const upperKey = key.toUpperCase();
       const activeCategories: DynamicCategory[] = current.activeCategories ?? [];
-      const target = activeCategories.find((c) => c.key === upperKey);
+      // 大小写不敏感匹配，并按大类实际行的 key 下删除 op（与 deleteGroup 一致），避免历史非大写 key 删不掉
+      const target = activeCategories.find((c) => c.key.toUpperCase() === upperKey);
       if (target?.isDefault) {
         throw new Error(`「${target.label}」是系统默认大类，不允许删除，如需调整可编辑其名称`);
       }
 
-      const ops: SyncOp[] = [{ entity: "activeCategory", op: "delete", key: upperKey }];
+      const ops: SyncOp[] = [{ entity: "activeCategory", op: "delete", key: target ? target.key : upperKey }];
 
       const ok = await StorageService.saveInternal(ops);
       if (!ok) {

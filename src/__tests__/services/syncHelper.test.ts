@@ -226,4 +226,154 @@ describe("SyncHelper", () => {
       expect(resolved).toBe(true);
     });
   });
+
+  describe("loadFromServer (串行链 + 区间只扩不缩，bug 2 竞态修复)", () => {
+    const makeRes = (body: any, status = 200) => ({
+      status,
+      ok: status >= 200 && status < 300,
+      headers: new Headers(),
+      json: async () => body
+    });
+
+    beforeEach(() => {
+      (SyncHelper as any).loadedStartDate = undefined;
+      (SyncHelper as any).loadedEndDate = undefined;
+      (SyncHelper as any).loadChain = Promise.resolve();
+      (SyncHelper as any).currentDbVersion = undefined;
+    });
+
+    it("never shrinks the loaded range: a narrower follow-up request re-fetches the union, keeping the wider window", async () => {
+      const urls: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+        urls.push(url);
+        return makeRes({ ledgers: [], ledgerItems: [], dbVersion: 1 });
+      }));
+
+      await SyncHelper.loadFromServer("2026-07-01", "2026-09-30");
+      await SyncHelper.loadFromServer("2026-08-01", "2026-08-31"); // 更窄
+
+      expect(urls[0]).toContain("start=2026-07-01");
+      expect(urls[0]).toContain("end=2026-09-30");
+      // 第二次与已加载区间取并集 → 仍是 7-01 ~ 9-30，绝不收缩到只剩 8 月
+      expect(urls[1]).toContain("start=2026-07-01");
+      expect(urls[1]).toContain("end=2026-09-30");
+      expect((SyncHelper as any).loadedStartDate).toBe("2026-07-01");
+      expect((SyncHelper as any).loadedEndDate).toBe("2026-09-30");
+    });
+
+    it("serializes concurrent loads so the second computes its range against the first's committed window", async () => {
+      const calls: string[] = [];
+      let resolveFirst: () => void = () => {};
+      vi.stubGlobal("fetch", vi.fn((url: string) => {
+        calls.push(url);
+        if (calls.length === 1) {
+          return new Promise((res) => { resolveFirst = () => res(makeRes({ ledgerItems: [], dbVersion: 1 })); });
+        }
+        return Promise.resolve(makeRes({ ledgerItems: [], dbVersion: 1 }));
+      }));
+
+      const p1 = SyncHelper.loadFromServer("2026-07-01", "2026-09-30"); // 宽
+      const p2 = SyncHelper.loadFromServer("2026-08-01", "2026-08-31"); // 窄，排在 p1 之后
+
+      // p2 的 fetch 尚未发出：它在链上等 p1 完成
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(calls).toHaveLength(1);
+
+      resolveFirst();
+      await Promise.all([p1, p2]);
+
+      expect(calls).toHaveLength(2);
+      // 第二次请求基于 p1 落地后的区间取并集
+      expect(calls[1]).toContain("start=2026-07-01");
+      expect(calls[1]).toContain("end=2026-09-30");
+    });
+
+    it("a no-arg refresh after a ranged load re-requests that same range with bypassCache (级联刷新)", async () => {
+      const urls: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+        urls.push(url);
+        return makeRes({ ledgerItems: [], dbVersion: 2 });
+      }));
+
+      await SyncHelper.loadFromServer("2026-09-01", "2026-09-30");
+      await SyncHelper.loadFromServer(); // 无参 = 强制刷新
+
+      expect(urls[1]).toContain("start=2026-09-01");
+      expect(urls[1]).toContain("end=2026-09-30");
+      expect(urls[1]).toContain("bypassCache=true");
+    });
+
+    it("a failed load does not block subsequently queued loads on the chain", async () => {
+      let n = 0;
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        n += 1;
+        if (n === 1) throw new Error("network down");
+        return makeRes({ ledgerItems: [], dbVersion: 1 });
+      }));
+
+      const r1 = await SyncHelper.loadFromServer("2026-07-01", "2026-07-31");
+      const r2 = await SyncHelper.loadFromServer("2026-08-01", "2026-08-31");
+
+      expect(r1).toBeNull();
+      expect(r2).not.toBeNull();
+    });
+  });
+
+  describe("fetchWithVersion 版本冲突（409）通知解耦，bug 4", () => {
+    const defaultOnConflict = SyncHelper.onVersionConflict;
+
+    afterEach(() => {
+      SyncHelper.onVersionConflict = defaultOnConflict;
+    });
+
+    it("routes a 409 through the injectable onVersionConflict callback (not a hard-coded window.alert) and throws VERSION_CONFLICT", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        status: 409,
+        ok: false,
+        headers: new Headers(),
+        json: async () => ({ error: "数据已被其他终端修改，请刷新页面获取最新数据后重试" })
+      })));
+      const spy = vi.fn();
+      SyncHelper.onVersionConflict = spy;
+
+      await expect(SyncHelper.fetchWithVersion("/api/ledgers/KID", { method: "PUT" }))
+        .rejects.toThrow("VERSION_CONFLICT");
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0][0]).toContain("数据已被其他终端修改");
+    });
+
+    it("still throws VERSION_CONFLICT when the notifier is disabled (onVersionConflict = null)", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        status: 409, ok: false, headers: new Headers(), json: async () => ({})
+      })));
+      SyncHelper.onVersionConflict = null;
+
+      await expect(SyncHelper.fetchWithVersion("/api/ledgers/KID", { method: "PUT" }))
+        .rejects.toThrow("VERSION_CONFLICT");
+    });
+
+    it("a throwing notifier does not mask the VERSION_CONFLICT error", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        status: 409, ok: false, headers: new Headers(), json: async () => ({})
+      })));
+      SyncHelper.onVersionConflict = () => { throw new Error("notifier blew up"); };
+
+      await expect(SyncHelper.fetchWithVersion("/api/ledgers/KID", { method: "PUT" }))
+        .rejects.toThrow("VERSION_CONFLICT");
+    });
+
+    it("does not invoke the conflict notifier on a normal 2xx response", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        status: 200, ok: true, headers: new Headers(), json: async () => ({ success: true })
+      })));
+      const spy = vi.fn();
+      SyncHelper.onVersionConflict = spy;
+
+      await SyncHelper.fetchWithVersion("/api/ledgers/KID", { method: "PUT" });
+
+      expect(spy).not.toHaveBeenCalled();
+    });
+  });
 });

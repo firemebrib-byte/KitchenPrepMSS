@@ -11,7 +11,7 @@ import React, { useEffect, useState, useMemo, lazy, Suspense } from "react";
 import { Ledger, LedgerItem, DailyStockRecord, LedgerSortField, LedgerSortOrder } from "../../types/ledgerTypes.ts";
 import { LedgerService } from "../../services/ledgerStore.ts";
 import { LEDGER_UI_TEXT, LEDGER_HEADERS, LEDGER_PRINT_OUT_CONFIG, LEDGER_PRINT_STYLE1_CONFIG } from "../../constants/ledgerConstants.ts";
-import { LogBroker, matchPinyin, getDatesBetween } from "../../utils.ts";
+import { LogBroker, matchPinyin, getDatesBetween, computeLedgerDailyStockBalances } from "../../utils.ts";
 import { SearchableSelect } from "../shared/SearchableSelect.tsx";
 import { RawMaterialsDictService } from "../../services/rawMaterialDict.ts";
 import { FoodCategory } from "../../types/types.ts";
@@ -503,32 +503,18 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
     return getDatesBetween(style2StartDate, style2EndDate);
   }, [style2StartDate, style2EndDate]);
 
-  /** 样式二下单个原料自定义时间段内每天的历史库存结余计算映射表 */
+  /**
+   * @description 样式二下单个原料在自定义时间段内每天的“当日结余库存”映射表。
+   * 结余锚定在“真实当前库存”（基于服务端全历史累计的 historicalTotalIn/Out）上，不再从“内存中早于区间的
+   * dailyRecords”反推期初——那样在跨月查看时会因为更早月份的记录被按月懒加载排除而算出错误的负库存
+   * （见 utils.ts computeLedgerDailyStockBalances）。
+   */
   const dailyStockBalances = useMemo(() => {
     if (!activeItemId) return {};
     const item = ledgerItems.find((i) => i.id === activeItemId);
     if (!item) return {};
-
-    const balances: Record<string, number> = {};
-
-    // 计算开始日期之前的历史期初库存（从初始库存出发，加减所有早于 style2StartDate 的出入库记录）
-    let startBalance = item.initialStock || 0;
-    Object.entries(item.dailyRecords).forEach(([dateKey, record]) => {
-      if (dateKey < style2StartDate) {
-        startBalance += (record.inQuantity || 0) - (record.outQuantity || 0);
-      }
-    });
-
-    // 从期初库存开始，逐日正向累计出入库变动，推算每天结余
-    let accum = Math.round(startBalance * 100) / 100;
-    style2DatesArray.forEach((dateStr) => {
-      const record = item.dailyRecords[dateStr] || { inQuantity: 0, outQuantity: 0 };
-      accum = accum + (record.inQuantity || 0) - (record.outQuantity || 0);
-      balances[dateStr] = Math.round(accum * 100) / 100;
-    });
-
-    return balances;
-  }, [activeItemId, ledgerItems, style2StartDate, style2EndDate, style2DatesArray]);
+    return computeLedgerDailyStockBalances(item, style2DatesArray);
+  }, [activeItemId, ledgerItems, style2DatesArray]);
 
   /** 当日有入库行为的项目列表 (用于生成入库单) */
   const dailyInwardItems = useMemo(() => {

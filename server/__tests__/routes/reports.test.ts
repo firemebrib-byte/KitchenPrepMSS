@@ -33,8 +33,8 @@ beforeEach(async () => {
   process.env.SKIP_SEEDING = "1";
 
   vi.resetModules();
-  const { storageRouter } = await import("./storage.ts");
-  const { groupsRouter, categoriesRouter } = await import("./reports.ts");
+  const { storageRouter } = await import("../../routes/storage.ts");
+  const { groupsRouter, categoriesRouter } = await import("../../routes/reports.ts");
 
   app = express();
   app.use(express.json());
@@ -114,6 +114,21 @@ describe("DELETE /api/groups/:key", () => {
     expect(loadRes.body.reports.find((r: any) => r.targetGroup === "CUSTOM")).toBeUndefined();
     expect(loadRes.body.ledgers.find((l: any) => l.id === "CUSTOM")).toBeUndefined();
     expect(loadRes.body.ledgerItems.find((i: any) => i.id === "li_1")).toBeUndefined();
+  });
+
+  it("actually removes a group whose stored key is not upper-case (deletes by the real row key, not a re-cased guess)", async () => {
+    await saveOps([
+      { entity: "activeGroup", op: "upsert", key: "night", data: { key: "night", label: "幼儿晚餐", emoji: "🌙", isDefault: false } },
+      { entity: "activeGroup", op: "upsert", key: "ANCHOR", data: { key: "ANCHOR", label: "占位人群", emoji: "🍽️", isDefault: true } },
+      { entity: "ledger", op: "upsert", key: "night", data: { id: "night", name: "幼儿晚餐", createdAt: "2026-01-01T00:00:00.000Z" } }
+    ]);
+
+    const res = await request(app).delete("/api/groups/NIGHT"); // 大写请求，行里存的是小写
+    expect(res.status).toBe(200);
+
+    const loadRes = await request(app).get("/api/storage/load");
+    expect(loadRes.body.activeGroups.find((g: any) => g.key.toUpperCase() === "NIGHT")).toBeUndefined();
+    expect(loadRes.body.ledgers.find((l: any) => l.id.toUpperCase() === "NIGHT")).toBeUndefined();
   });
 });
 

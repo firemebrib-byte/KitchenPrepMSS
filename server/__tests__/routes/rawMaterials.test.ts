@@ -33,8 +33,8 @@ beforeEach(async () => {
   process.env.SKIP_SEEDING = "1";
 
   vi.resetModules();
-  const { storageRouter } = await import("./storage.ts");
-  const { rawMaterialsRouter } = await import("./rawMaterials.ts");
+  const { storageRouter } = await import("../../routes/storage.ts");
+  const { rawMaterialsRouter } = await import("../../routes/rawMaterials.ts");
 
   app = express();
   app.use(express.json());

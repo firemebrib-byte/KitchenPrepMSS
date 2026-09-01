@@ -77,7 +77,7 @@ beforeEach(async () => {
   process.env.SKIP_SEEDING = "1";
 
   vi.resetModules();
-  const mod = await import("./storageService.ts");
+  const mod = await import("../storageService.ts");
   StorageService = mod.StorageService;
 });
 
@@ -111,7 +111,7 @@ describe("StorageService (local mode, SQLite-backed, normalized schema)", () => 
     it("returns the auto-generated seed data when no data exists yet and SKIP_SEEDING is not set", async () => {
       delete process.env.SKIP_SEEDING;
       vi.resetModules();
-      const mod = await import("./storageService.ts");
+      const mod = await import("../storageService.ts");
       StorageService = mod.StorageService;
 
       const data = await StorageService.load();
@@ -122,7 +122,7 @@ describe("StorageService (local mode, SQLite-backed, normalized schema)", () => 
     it("REGRESSION: seeds each preparedItem's dailyData with bare day-of-month keys (\"1\".. \"31\"), not \"YYYY-MM-DD\" — must match the key format every other read/write site (App.tsx/TableGrid.tsx/updateCell/syncFromLedger 等) actually consumes", async () => {
       delete process.env.SKIP_SEEDING;
       vi.resetModules();
-      const mod = await import("./storageService.ts");
+      const mod = await import("../storageService.ts");
       StorageService = mod.StorageService;
 
       const data = await StorageService.load();

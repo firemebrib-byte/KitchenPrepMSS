@@ -32,8 +32,8 @@ beforeEach(async () => {
   process.env.SKIP_SEEDING = "1";
 
   vi.resetModules();
-  const { storageRouter } = await import("./storage.ts");
-  const { ledgersRouter, ledgerItemsRouter } = await import("./ledgers.ts");
+  const { storageRouter } = await import("../../routes/storage.ts");
+  const { ledgersRouter, ledgerItemsRouter } = await import("../../routes/ledgers.ts");
 
   app = express();
   app.use(express.json());
@@ -104,6 +104,23 @@ describe("PUT /api/ledgers/:id", () => {
     const res = await request(app).put("/api/ledgers/KID").send({ name: "在校生备餐" });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/已存在/);
+  });
+
+  it("CASCADE (casing): links to an existing group whose key differs only in case — updates it, never creates a duplicate", async () => {
+    // 模拟历史遗留：台账 id 与人群 key 大小写不一致（updateLedger 曾用精确匹配，会误判成“人群不存在”而新建重复行）
+    await saveOps([
+      { entity: "ledger", op: "upsert", key: "night", data: { id: "night", name: "幼儿晚餐", createdAt: "2026-01-01T00:00:00.000Z" } },
+      { entity: "activeGroup", op: "upsert", key: "NIGHT", data: { key: "NIGHT", label: "幼儿晚餐", emoji: "🌙" } }
+    ]);
+
+    const res = await request(app).put("/api/ledgers/night").send({ name: "幼儿加餐" });
+    expect(res.status).toBe(200);
+
+    const loadRes = await request(app).get("/api/storage/load");
+    const nightGroups = loadRes.body.activeGroups.filter((g: any) => g.key.toUpperCase() === "NIGHT");
+    expect(nightGroups).toHaveLength(1);               // 没有产生重复人群行
+    expect(nightGroups[0].key).toBe("NIGHT");          // 沿用人群原有 key，不猜测重新大小写
+    expect(nightGroups[0].label).toBe("幼儿加餐");      // 名称已同步
   });
 });
 

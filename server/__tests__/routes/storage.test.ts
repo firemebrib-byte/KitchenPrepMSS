@@ -30,7 +30,7 @@ beforeEach(async () => {
   process.env.LOCAL_DATA_DIR = path.join(tmpDir, "data");
 
   vi.resetModules();
-  const { storageRouter } = await import("./storage.ts");
+  const { storageRouter } = await import("../../routes/storage.ts");
 
   app = express();
   app.use(express.json());
