@@ -85,6 +85,11 @@ export interface LedgerItem {
   unit: string;
   /** 原料规格或辅助备注描述 */
   spec?: string;
+  /**
+   * 所属二级食材大类的 key（如 VEGETABLE / MEAT）。**新建该原料项时从原料字典抄一次的快照**，
+   * 此后与字典解耦——字典改名/删除都不会改它。为空表示当时字典里查不到，展示层归到"未分类"。
+   */
+  category?: string | null;
   /** 初始库存数量 (系统新建该原料项目时的默认库存) */
   initialStock: number;
   /** 当前实时库存数量 (计算公式: 初始库存 + 历史所有天入库累加 - 历史所有天出库累加) */
@@ -95,6 +100,10 @@ export interface LedgerItem {
   historicalTotalOut?: number;
   /** 服务端预计算的该原料所有的历史累计入库金额（对全部逐日流水 inAmount 求和，不受前端拉取的月份日期区间影响） */
   historicalTotalInAmount?: number;
+  /** 服务端预计算的该原料**全历史**最早一条逐日流水的日期（YYYY-MM-DD）；无任何流水时为 null/undefined。不受前端按月懒加载影响 */
+  historicalFirstRecordDate?: string | null;
+  /** 服务端预计算的该原料**全历史**最近一条逐日流水的日期（YYYY-MM-DD）；无任何流水时为 null/undefined。用于"最近一次录入是哪天"的准确提示 */
+  historicalLastRecordDate?: string | null;
   /** 每日出入库及明细记录，以 YYYY-MM-DD 为 Key 进行索引 */
   dailyRecords: Record<string, DailyStockRecord>;
 }

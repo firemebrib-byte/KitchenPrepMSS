@@ -59,8 +59,8 @@ ledgersRouter.delete("/:id", async (req, res) => {
  */
 ledgersRouter.post("/:ledgerId/items", async (req, res) => {
   try {
-    const { name, unit, spec, initialStock } = req.body ?? {};
-    const item = await StorageService.addLedgerItem({ ledgerId: req.params.ledgerId, name, unit, spec, initialStock });
+    const { name, unit, spec, initialStock, category } = req.body ?? {};
+    const item = await StorageService.addLedgerItem({ ledgerId: req.params.ledgerId, name, unit, spec, initialStock, category });
     res.json({ success: true, item });
   } catch (err: any) {
     console.error("[API LEDGER ITEM ADD ERROR]", err);
@@ -74,8 +74,8 @@ ledgersRouter.post("/:ledgerId/items", async (req, res) => {
  */
 ledgerItemsRouter.put("/:id", async (req, res) => {
   try {
-    const { name, unit, spec, initialStock } = req.body ?? {};
-    const item = await StorageService.updateLedgerItem(req.params.id, { name, unit, spec, initialStock });
+    const { name, unit, spec, initialStock, category } = req.body ?? {};
+    const item = await StorageService.updateLedgerItem(req.params.id, { name, unit, spec, initialStock, category });
     res.json({ success: true, item });
   } catch (err: any) {
     console.error("[API LEDGER ITEM UPDATE ERROR]", err);

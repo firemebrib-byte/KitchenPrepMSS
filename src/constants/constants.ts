@@ -33,3 +33,27 @@ export const UI_TEXT = {
   summaryName: "全品类预算合计汇总",
   noDataMessage: "该品类暂无细分材料，请在左侧「原料购销台账」中录入对应原料的出入库数据。"
 };
+
+/**
+ * @description 台账采购原料项没有分类快照（`item.category` 为空，通常是建项时字典里查不到、或字典条目后来被删）
+ * 时，展示层统一归入的“未分类”兜底大类的 key 与显示名。字典与台账解耦后，孤立项走这个桶，不会再从界面消失。
+ */
+export const UNCATEGORIZED_CATEGORY_KEY = "__UNCATEGORIZED__";
+export const UNCATEGORIZED_CATEGORY_LABEL = "未分类";
+
+/**
+ * @description 解析一个台账采购原料项应归属的二级大类 key：优先用项自带的 category 快照，
+ * 其次回退按 name 从原料字典查一次（兼容升级前建的、快照列还没回填的老数据 / COS 模式），
+ * 都没有则归 UNCATEGORIZED_CATEGORY_KEY。
+ * @param item 台账采购原料项（至少含 name，理想含 category）
+ * @param dictLookup 传入 (name) => category 的字典查询函数（通常是 RawMaterialsDictService.getCategoryForMaterial）
+ */
+export function resolveLedgerItemCategory(
+  item: { name?: string; category?: string | null },
+  dictLookup: (name: string) => string | null
+): string {
+  const snap = (item.category ?? "").trim();
+  if (snap) return snap;
+  const fromDict = item.name ? dictLookup(item.name) : null;
+  return fromDict || UNCATEGORIZED_CATEGORY_KEY;
+}

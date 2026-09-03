@@ -16,6 +16,7 @@ import { RawMaterialsDictService } from "../../services/rawMaterialDict.ts";
 import { PrepReportService } from "../../services/store.ts";
 import { LEDGER_HEADERS } from "../../constants/ledgerConstants.ts";
 import { FoodCategory } from "../../types/types.ts";
+import { resolveLedgerItemCategory, UNCATEGORIZED_CATEGORY_KEY, UNCATEGORIZED_CATEGORY_LABEL } from "../../constants/constants.ts";
 import { HelperSelect } from "../shared/HelperSelect.tsx";
 import { SensorySelector } from "../shared/SensorySelector.tsx";
 
@@ -194,7 +195,9 @@ export function LedgerStyle1Table({
             <option value="">全部品类</option>
             {availableCategories.map(cat => (
               <option key={cat} value={cat}>
-                {PrepReportService.getActiveCategories().find(c => c.key === cat)?.label || cat}
+                {cat === UNCATEGORIZED_CATEGORY_KEY
+                  ? UNCATEGORIZED_CATEGORY_LABEL
+                  : (PrepReportService.getActiveCategories().find(c => c.key === cat)?.label || cat)}
               </option>
             ))}
           </select>
@@ -417,9 +420,14 @@ export function LedgerStyle1Table({
                       {/* 二级品类标签列 */}
                       <td className="px-3 py-2.5 text-center bg-violet-50/30 whitespace-nowrap">
                         {(() => {
-                          const dictItem2 = RawMaterialsDictService.getItems().find(d => d.name === item.name);
-                          const cat = dictItem2?.category;
-                          if (!cat) return <span className="text-slate-300 text-[11px]">—</span>;
+                          const cat = resolveLedgerItemCategory(item, (n) => RawMaterialsDictService.getCategoryForMaterial(n));
+                          if (cat === UNCATEGORIZED_CATEGORY_KEY) {
+                            return (
+                              <span className="text-[11px] font-bold px-1.5 py-0.5 rounded border bg-gray-100 text-gray-500 border-gray-200" title="该原料没有分类快照（字典里查不到），已归入未分类">
+                                {UNCATEGORIZED_CATEGORY_LABEL}
+                              </span>
+                            );
+                          }
                           const activeCat = PrepReportService.getActiveCategories().find(c => c.key === cat);
                           const catLabel = activeCat ? activeCat.label : cat;
                           const colorMap: Record<string, string> = {

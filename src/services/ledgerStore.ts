@@ -266,13 +266,15 @@ export class LedgerService {
     name: string,
     unit: string,
     spec: string,
-    initialStock: number
+    initialStock: number,
+    category?: string
   ): Promise<LedgerItem> {
-    // 校验规则已迁移到后端（阶段B，见 SQLite迁移规划.md），前端只负责发起请求并用响应更新内存缓存
+    // 校验规则已迁移到后端（阶段B，见 SQLite迁移规划.md），前端只负责发起请求并用响应更新内存缓存。
+    // category 是快照：传字典里查到的大类，后端也会兜底再查一次（字典查不到就留空）。
     const res = await SyncHelper.fetchWithVersion(`/api/ledgers/${encodeURIComponent(ledgerId)}/items`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, unit, spec, initialStock })
+      body: JSON.stringify({ name, unit, spec, initialStock, category })
     });
     const body = await res.json();
     if (!res.ok) {
@@ -297,13 +299,14 @@ export class LedgerService {
     name: string,
     unit: string,
     spec: string,
-    initialStock: number
+    initialStock: number,
+    category?: string
   ): Promise<void> {
     const oldName = this.ledgerItems.find((item) => item.id === id)?.name;
     const res = await SyncHelper.fetchWithVersion(`/api/ledger-items/${encodeURIComponent(id)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, unit, spec, initialStock })
+      body: JSON.stringify({ name, unit, spec, initialStock, category })
     });
     const body = await res.json();
     if (!res.ok) {
@@ -314,7 +317,8 @@ export class LedgerService {
       this.ledgerItems.push(body.item);
     } else {
       this.ledgerItems = [...this.ledgerItems];
-      this.ledgerItems[itemIndex] = body.item;
+      // 仅改了原料基础信息，未动任何单日流水：按天并集合并，保留前端已加载的其它月份 dailyRecords
+      this.ledgerItems[itemIndex] = LedgerService.mergeServerItemDaily(this.ledgerItems[itemIndex], body.item);
     }
     this.notifyListeners();
     LogBroker.publish("INFO", "LedgerService", `【修改原料】成功修改采购原料「${oldName}」的配置参数，并重新同步折算库存。`);
@@ -395,10 +399,33 @@ export class LedgerService {
     }
 
     const itemIndex = this.ledgerItems.findIndex((i) => i.id === itemId);
-    this.ledgerItems = [...this.ledgerItems];
-    this.ledgerItems[itemIndex] = body.item;
+    if (itemIndex !== -1) {
+      this.ledgerItems = [...this.ledgerItems];
+      this.ledgerItems[itemIndex] = LedgerService.mergeServerItemDaily(this.ledgerItems[itemIndex], body.item, dateStr);
+    } else {
+      this.ledgerItems = [...this.ledgerItems, body.item];
+    }
     this.notifyListeners();
 
+  }
+
+  /**
+   * @description 把服务端返回的某个原料项（其 dailyRecords 只包含本次编辑的那一天、或按后端加载区间裁剪过）
+   * 合并进前端内存里已有的同一个原料项：标量字段（currentStock / historicalTotal* / name 等）以服务端为准，
+   * dailyRecords 则在**保留前端已加载的其它日期**的前提下，仅对本次编辑的 `changedDate` 做覆盖或删除。
+   * 避免"编辑某一天 → 整个 item 被替换成只含当月/当天的版本 → 已加载的其它月份数据在内存里丢失 → 合计汇总显示不全"。
+   * @param prev 前端内存中已有的原料项（可能为空）
+   * @param serverItem 服务端本次返回的原料项
+   * @param changedDate 本次实际写入/删除的那一天 (YYYY-MM-DD)；不传表示本次没有改动任何单日记录（如仅改原料基础信息），只做并集
+   * @returns 合并后的原料项
+   */
+  private static mergeServerItemDaily(prev: LedgerItem | undefined, serverItem: LedgerItem, changedDate?: string): LedgerItem {
+    const mergedDaily: Record<string, DailyStockRecord> = { ...(prev?.dailyRecords || {}), ...(serverItem.dailyRecords || {}) };
+    // 服务端返回里没有 changedDate ⇒ 该天记录已被判定为“无数据”而删除，前端也要同步删掉，不能保留旧值
+    if (changedDate && serverItem.dailyRecords && !serverItem.dailyRecords[changedDate]) {
+      delete mergedDaily[changedDate];
+    }
+    return { ...serverItem, dailyRecords: mergedDaily };
   }
 
   /**
@@ -423,14 +450,17 @@ export class LedgerService {
     const updatedItems: LedgerItem[] = body.updatedItems;
     const mergedRecords: Record<string, DailyStockRecord> = body.mergedRecords;
 
-    // 批量更新内存缓存
+    // 批量更新内存缓存：同 updateDailyRecord，按天合并，保留前端已加载的其它日期数据
     const newLedgerItems = [...this.ledgerItems];
     let needsNotify = false;
 
     for (const updatedItem of updatedItems) {
       const itemIndex = newLedgerItems.findIndex((i) => i.id === updatedItem.id);
       if (itemIndex !== -1) {
-        newLedgerItems[itemIndex] = updatedItem;
+        newLedgerItems[itemIndex] = LedgerService.mergeServerItemDaily(newLedgerItems[itemIndex], updatedItem, dateStr);
+        needsNotify = true;
+      } else {
+        newLedgerItems.push(updatedItem);
         needsNotify = true;
       }
 
@@ -442,48 +472,8 @@ export class LedgerService {
     }
   }
 
-  /**
-   * @description 当从后台原料大底库修改了原料属性时，级联同步更新所有关联的已存台账采购原料项目参数
-   * @param newSpec 新规格描述（原料字典的备注字段），可选——不传时保留台账原料项目原有的规格不变
-   */
-  public static cascadeUpdateMaterial(oldName: string, newName: string, newUnit: string, newSpec?: string): void {
-    let changed = false;
-    const changedItems: LedgerItem[] = [];
-    this.ledgerItems = this.ledgerItems.map((item) => {
-      if (item.name === oldName) {
-        changed = true;
-        const updated = {
-          ...item,
-          name: newName,
-          unit: newUnit,
-          spec: newSpec !== undefined ? newSpec : item.spec
-        };
-        changedItems.push(updated);
-        return updated;
-      }
-      return item;
-    });
-    if (changed) {
-      this.notifyListeners();
-      changedItems.forEach((item) => {
-        SyncHelper.queueChange({ entity: "ledgerItem", op: "upsert", key: item.id, data: item });
-      });
-    }
-  }
-
-  /**
-   * @description 当从后台原料大底库删除了原料时，级联同步删除所有关联的已存台账采购项
-   */
-  public static cascadeDeleteMaterial(name: string): void {
-    const removedItems = this.ledgerItems.filter((item) => item.name === name);
-    if (removedItems.length > 0) {
-      this.ledgerItems = this.ledgerItems.filter((item) => item.name !== name);
-      this.notifyListeners();
-      removedItems.forEach((item) => {
-        SyncHelper.queueChange({ entity: "ledgerItem", op: "delete", key: item.id });
-      });
-    }
-  }
+  // [字典与台账解耦] 原先的 cascadeUpdateMaterial / cascadeDeleteMaterial（后台改/删原料字典时反向刷台账里的
+  // 同名采购项）已随"字典改动不影响台账"整体删除——台账项的 name/unit/spec/category 是建项时的快照，各自独立。
 
   /**
    * @description 供 SyncHelper.refreshNow() 静默更新内存中的台账列表，防止 LocalStorage 覆写

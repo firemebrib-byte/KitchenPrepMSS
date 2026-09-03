@@ -15,6 +15,7 @@ import { LogBroker, matchPinyin, getDatesBetween, computeLedgerDailyStockBalance
 import { SearchableSelect } from "../shared/SearchableSelect.tsx";
 import { RawMaterialsDictService } from "../../services/rawMaterialDict.ts";
 import { FoodCategory } from "../../types/types.ts";
+import { resolveLedgerItemCategory, UNCATEGORIZED_CATEGORY_KEY } from "../../constants/constants.ts";
 import { PrepReportService } from "../../services/store.ts";
 import { LedgerPrintDoc } from "./LedgerPrintDoc.tsx";
 import { LedgerPrintPreviewOverlay } from "./LedgerPrintPreviewOverlay.tsx";
@@ -160,9 +161,9 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
   const [printPreviewStyle, setPrintPreviewStyle] = useState<null | "style1" | "style2" | "style3">(null);
   /** 二级分类勾选打印控制弹窗 */
   const [printModalOpen, setPrintModalOpen] = useState<boolean>(false);
-  /** 总表打印预览下选中的二级食材分类（默认包含全部大类） */
+  /** 总表打印预览下选中的二级食材分类（默认包含全部大类 + “未分类”兜底桶） */
   const [selectedPrintCategories, setSelectedPrintCategories] = useState<FoodCategory[]>(() =>
-    PrepReportService.getActiveCategories().map(c => c.key)
+    [...PrepReportService.getActiveCategories().map(c => c.key), UNCATEGORIZED_CATEGORY_KEY]
   );
 
   /** 动态补充的空白行数（打印和预览时生效，按类型分离记忆） */
@@ -237,11 +238,9 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
   /** 过滤并整合出当前选中台账应该显示的采购原料项目（非录入模式下仅展示台账已持有的正式原料，录入模式下默认平铺所有字典原料以直接编辑）*/
   const currentLedgerItems = useMemo(() => {
     const dictItems = RawMaterialsDictService.getItems();
-    // 找出已保存在数据库本台账下的正式原料
-    const dbItems = ledgerItems.filter((item) => {
-      const exists = dictItems.some((d) => d.name === item.name);
-      return item.ledgerId === activeLedgerId && exists;
-    });
+    // 本台账下所有正式采购原料项。[字典与台账解耦] 不再要求“必须在字典里存在”——
+    // 字典删了/改名了，台账项照样展示（name/unit/spec/category 都是建项时的快照）。
+    const dbItems = ledgerItems.filter((item) => item.ledgerId === activeLedgerId);
 
     // 如果非录入模式，则保持只展示正式存在的原料
     if (!isRecordingMode) {
@@ -249,9 +248,10 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
     }
 
     const dbItemsMap = new Map(dbItems.map((item) => [item.name, item]));
+    const dictNames = new Set(dictItems.map((d) => d.name));
 
     // 录入模式下，动态合并已有的和临时的（带 temp_ 前缀 ID）以实现平铺所有大字典原料采购项
-    return dictItems.map((dictItem) => {
+    const flattened = dictItems.map((dictItem) => {
       if (dbItemsMap.has(dictItem.name)) {
         return dbItemsMap.get(dictItem.name)!;
       }
@@ -266,20 +266,21 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
         dailyRecords: {}
       } as LedgerItem;
     });
+
+    // [字典与台账解耦] 台账里已有、但字典里已没有的“孤立原料项”也要在录入模式露出来，
+    // 否则字典删掉某原料后，它在本台账的历史数据在录入模式下就看不见/改不了了。
+    const orphans = dbItems.filter((item) => !dictNames.has(item.name));
+    return [...flattened, ...orphans];
   }, [ledgerItems, activeLedgerId, isRecordingMode]);
 
   /**
    * @description 本台账内实际存在采购原料项目的二级食材大类集合，供打印勾选弹窗禁用"本台账在该大类下压根没有任何原料、选了也是空表"的大类
    */
   const printableCategories = useMemo(() => {
-    const dictItems = RawMaterialsDictService.getItems();
     const dbItems = ledgerItems.filter((item) => item.ledgerId === activeLedgerId);
     const result = new Set<FoodCategory>();
     dbItems.forEach((item) => {
-      const dictItem = dictItems.find((d) => d.name === item.name);
-      if (dictItem) {
-        result.add(dictItem.category);
-      }
+      result.add(resolveLedgerItemCategory(item, (n) => RawMaterialsDictService.getCategoryForMaterial(n)));
     });
     return result;
   }, [ledgerItems, activeLedgerId]);
@@ -312,13 +313,17 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
     const hasRecordOnSelectedDate = currentLedgerItems.some((item) => !!item.dailyRecords[selectedDate]);
     if (hasRecordOnSelectedDate) return null;
 
+    // 优先取服务端预聚合的“全历史最近记录日期”（historicalLastRecordDate，不受按月懒加载影响），
+    // 内存里已加载的最大日期只作为兜底；两者取较大值，避免因当前只加载了某个月而把“最近一次录入”误报成较早/较晚的错误日期。
     let latestDate: string | null = null;
+    const consider = (d: string | null | undefined) => {
+      if (d && (!latestDate || d > latestDate)) {
+        latestDate = d;
+      }
+    };
     currentLedgerItems.forEach((item) => {
-      Object.keys(item.dailyRecords).forEach((d) => {
-        if (!latestDate || d > latestDate) {
-          latestDate = d;
-        }
-      });
+      consider(item.historicalLastRecordDate);
+      Object.keys(item.dailyRecords).forEach((d) => consider(d));
     });
     return latestDate;
   }, [currentLedgerItems, selectedDate, isRecordingMode]);
@@ -328,11 +333,10 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
    * 依赖：名称搜索词、品类、采购员、检验员、保管员、选定日期
    */
   const filteredLedgerItems = useMemo(() => {
-    const dictItems = RawMaterialsDictService.getItems();
     return currentLedgerItems.filter((item) => {
-      // 安全防呆校验：当前显示的台账原料必须存在于后台设置的原料字典大底库中，避免后台不存在的品类出现
-      const dictItem = dictItems.find(d => d.name === item.name);
-      if (!dictItem) return false;
+      // [字典与台账解耦] 不再要求原料必须在字典里存在——字典删了/改名了，台账项照样显示。
+      // 分类走 item.category 快照，缺失时回退字典、再缺失归“未分类”。
+      const itemCategory = resolveLedgerItemCategory(item, (n) => RawMaterialsDictService.getCategoryForMaterial(n));
 
       // 非录入模式下，仅展示当前所选同步日期确实存在出入库记录的原料；曾在其他日期录入过、但当天未采购的原料不再显示，
       // 避免总表出现大量与当天无关的空白行
@@ -342,7 +346,7 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
         if (!matchPinyin(item.name, filterName)) return false;
       }
       if (filterCategory) {
-        if (dictItem.category !== filterCategory) return false;
+        if (itemCategory !== filterCategory) return false;
       }
       if (filterBuyer.trim()) {
         const rec = item.dailyRecords[selectedDate];
@@ -365,7 +369,6 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
    * 默认按二级品类分类排序；支持按原材料名称、供货商、采购员、采购时间、检验员、保管员、出库人、接收人升序或降序排列
    */
   const sortedFilteredLedgerItems = useMemo(() => {
-    const dictItems = RawMaterialsDictService.getItems();
     const activeCats = PrepReportService.getActiveCategories();
 
     /** 获取某个原料在指定排序字段下的对比文本值 */
@@ -378,8 +381,9 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
         case "materialName":
           return item.name || "";
         case "category": {
-          const dictItem = dictItems.find((d) => d.name === item.name);
-          const catKey = dictItem?.category || "";
+          const catKey = resolveLedgerItemCategory(item, (n) => RawMaterialsDictService.getCategoryForMaterial(n));
+          // 该返回值仅作排序比较键（表头“二级品类”列的显示另在 LedgerStyle1Table 里渲染），未分类项按“未分类”拼音参与排序
+          if (catKey === UNCATEGORIZED_CATEGORY_KEY) return "未分类";
           const catObj = activeCats.find((c) => c.key === catKey);
           return catObj ? catObj.label : catKey;
         }
@@ -426,11 +430,9 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
 
   /** 当前台账存在的品类集合（动态），用于品类筛选下拉 */
   const availableCategories = useMemo(() => {
-    const dictItems = RawMaterialsDictService.getItems();
     const catSet = new Set<string>();
     currentLedgerItems.forEach(item => {
-      const dictItem = dictItems.find(d => d.name === item.name);
-      if (dictItem?.category) catSet.add(dictItem.category);
+      catSet.add(resolveLedgerItemCategory(item, (n) => RawMaterialsDictService.getCategoryForMaterial(n)));
     });
     return Array.from(catSet);
   }, [currentLedgerItems]);
@@ -606,14 +608,56 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
     const item = currentLedgerItems.find((i) => i.id === id);
     if (!item) return;
 
-    const otherDatesWithRecords = Object.keys(item.dailyRecords).filter((date) => {
+    // 判断该原料在“当前所选日期以外的日期”是否还有记录时，绝不能只看前端内存里的 dailyRecords ——
+    // 按月懒加载下内存通常只有当前查看的月份，别的月份即使有记录也不在内存里。
+    // 一旦据此误判为“没有其它记录”，就会走进“物理删除整个原料 + 全部历史流水”的分支，把用户几个月前
+    // 录入的数据（比如蔬菜）连根删掉。这里叠加服务端提供的全历史信息（首/末记录日期、累计出入库量）一起判断。
+    const memOtherDates = Object.keys(item.dailyRecords).some((date) => {
       if (date === selectedDate) return false;
       const r = item.dailyRecords[date];
-      return r.inQuantity > 0 || r.outQuantity > 0 || r.purchaseDate || r.supplier;
+      return !!r && (r.inQuantity > 0 || r.outQuantity > 0 || !!r.purchaseDate || !!r.supplier || !!r.note ||
+        !!r.buyer || !!r.inspector || !!r.keeper || !!r.outHandler || !!r.outRecipient);
     });
+    const firstDate = item.historicalFirstRecordDate;
+    const lastDate = item.historicalLastRecordDate;
+    const serverDatesBeyondSelected =
+      (!!firstDate && firstDate !== selectedDate) || (!!lastDate && lastDate !== selectedDate);
+    // 服务端全历史累计出入库量，减去当前所选日内存里那条记录的量，若仍 > 0 说明别的日期也有流水
+    const selRec = item.dailyRecords[selectedDate];
+    const histInBeyond = (item.historicalTotalIn ?? 0) - (selRec?.inQuantity ?? 0);
+    const histOutBeyond = (item.historicalTotalOut ?? 0) - (selRec?.outQuantity ?? 0);
+    const serverTotalsBeyondSelected = histInBeyond > 0.001 || histOutBeyond > 0.001;
 
-    if (otherDatesWithRecords.length > 0) {
-      if (confirm(`确定清除（${selectedDate}）日的【${item.name}】的记录吗？`)) {
+    const hasRecordsBeyondSelectedDate = memOtherDates || serverDatesBeyondSelected || serverTotalsBeyondSelected;
+
+    // 是否拿到了服务端预聚合的“全历史首/末记录日期”这对字段。正常本地模式的 GET /load 一定带上（有记录时是日期串，
+    // 无记录时是 null）；只有“本次部署之前加载、还没刷新的老标签页”或 COS 模式才会整键缺失（undefined）。
+    const historyDatesKnown = firstDate !== undefined || lastDate !== undefined;
+    // 敢走“物理删除整个原料 + 全部历史”的前提：确信除了当前所选日之外没有别的历史。
+    // 字段已知 → 首/末记录日期要么不存在、要么就等于当前所选日（历史全在这一天，删掉只损失眼前看到的这条）。
+    const confidentSafeToFullyDelete =
+      historyDatesKnown &&
+      (!firstDate || firstDate === selectedDate) &&
+      (!lastDate || lastDate === selectedDate);
+
+    LogBroker.publish(
+      "INFO",
+      "LedgerSystem",
+      `点击删除台账原料【${item.name}】(id=${item.id})：判定为${
+        hasRecordsBeyondSelectedDate ? "「仅清除当天记录」" : confidentSafeToFullyDelete ? "「物理删除整个原料及全部历史」" : "「无法确认历史，拦截并提示刷新」"
+      }`,
+      `依据 -> 内存中其它日期有记录:${memOtherDates}, 服务端首/末记录日期越界:${serverDatesBeyondSelected}(first=${firstDate ?? "∅"},last=${lastDate ?? "∅"}), 服务端累计量越界:${serverTotalsBeyondSelected}(histIn=${item.historicalTotalIn ?? "∅"},histOut=${item.historicalTotalOut ?? "∅"}), 服务端首末日期字段已知:${historyDatesKnown}; selectedDate=${selectedDate}`
+    );
+
+    if (!hasRecordsBeyondSelectedDate && !confidentSafeToFullyDelete) {
+      // 没有“别处还有记录”的正向信号，但服务端首/末日期字段缺失（多半是数据尚未完整加载 / 老标签页），
+      // 无法确认是否有跨月历史。绝不物理删除——一旦确有历史就是连根删。拦下来让用户刷新页面后再操作。
+      triggerError(`暂时无法确认【${item.name}】在其它日期是否还有记录（数据可能尚未完整加载），请刷新页面后再删除该原料，以免误删历史数据。`);
+      return;
+    }
+
+    if (hasRecordsBeyondSelectedDate) {
+      if (confirm(`【${item.name}】在其它日期还有出入库记录，这里只会清除（${selectedDate}）当天的记录，不会影响其它日期。确定清除吗？`)) {
         LedgerService.updateDailyRecord(item.id, selectedDate, {
           inQuantity: 0,
           inPrice: 0,

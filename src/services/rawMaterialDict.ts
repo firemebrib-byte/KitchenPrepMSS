@@ -276,8 +276,8 @@ export class RawMaterialsDictService {
     conversionUnit?: string,
     conversionRatio?: number
   ): Promise<void> {
-    // 校验、isDefault 保留、级联更新台账里的同名条目均已迁移到后端（阶段A，见 SQLite迁移规划.md），
-    // 后端一次事务内完成级联，前端只负责发起请求、用响应更新内存缓存
+    // 校验、isDefault 保留在后端（阶段A，见 SQLite迁移规划.md）。
+    // [字典与台账解耦] 编辑/改名字典条目**不再**级联改动台账里的同名采购项，前端也就不需要再 refreshNow。
     const res = await SyncHelper.fetchWithVersion(`/api/raw-materials/${encodeURIComponent(oldName)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -293,28 +293,21 @@ export class RawMaterialsDictService {
     } else {
       this.items[index] = body.item;
     }
-    LogBroker.publish("INFO", "RawMaterialsDictService", `【原料字典】更新原料「${oldName}」为「${body.item.name}」（类别: ${category}，单位: ${unit}，备注: ${remark}，换算单位: ${conversionUnit}，换算比例: ${conversionRatio}）`);
-
-    // 级联结果只发生在后端 SQLite 里，台账当前的内存状态尚未感知，主动刷新一次，
-    // 避免用户改完名字后台账细表页面显得"过一会才更新"
-    await SyncHelper.refreshNow();
+    LogBroker.publish("INFO", "RawMaterialsDictService", `【原料字典】更新原料「${oldName}」为「${body.item.name}」（类别: ${category}，单位: ${unit}，备注: ${remark}）——仅影响录入联想，已有台账数据不变`);
   }
 
   /**
-   * @description 从字典中删除原料（系统默认生成的原料不允许删除，仅允许编辑）
+   * @description 从字典中删除原料（系统默认生成的原料不允许删除，仅允许编辑）。
+   * [字典与台账解耦] 只移除录入联想项，台账里同名的采购项与历史流水原样保留、不受影响。
    * @param name 原料品名
    */
   public static async deleteMaterial(name: string): Promise<void> {
-    // 校验（isDefault 保护）与级联删除台账里的同名条目均已迁移到后端，前端只负责发起请求
     const res = await SyncHelper.fetchWithVersion(`/api/raw-materials/${encodeURIComponent(name)}`, { method: "DELETE" });
     const body = await res.json();
     if (!res.ok) {
       throw new Error(body.error || "删除原料失败");
     }
     this.items = this.items.filter((item) => item.name !== name);
-    LogBroker.publish("WARN", "RawMaterialsDictService", `【原料字典】移除了原料「${name}」`);
-
-    // 同 updateMaterial：级联删除只发生在后端，主动刷新一次让操作者立即看到最新数据
-    await SyncHelper.refreshNow();
+    LogBroker.publish("WARN", "RawMaterialsDictService", `【原料字典】移除了原料「${name}」（仅移除录入联想项，已有台账数据不受影响）`);
   }
 }

@@ -152,4 +152,84 @@ describe("LogService", () => {
       expect(() => LogService.write("ERROR", "M", "should not throw")).not.toThrow();
     });
   });
+
+  describe("audit", () => {
+    /** 等一轮微任务，让异步的 fs.appendFile 落盘 */
+    const flushIo = () => new Promise((r) => setTimeout(r, 20));
+
+    const readByPrefix = (prefix: string): string => {
+      const files = fs.readdirSync(process.env.LOCAL_LOG_DIR!).filter((f) => f.startsWith(prefix) && f.endsWith(".log"));
+      return files.map((f) => fs.readFileSync(path.join(process.env.LOCAL_LOG_DIR!, f), "utf8")).join("");
+    };
+
+    it("writes a structured line to the dedicated audit-*.log stream", async () => {
+      LogService.audit("ledger.dailyRecord.update", "item=x date=2026-09-03 | 变更: inQuantity 0 -> 10", "req=ab12 PUT /x");
+      await flushIo();
+
+      const audit = readByPrefix("audit-");
+      expect(audit).toContain("[AUDIT]");
+      expect(audit).toContain("ledger.dailyRecord.update");
+      expect(audit).toContain("req=ab12 PUT /x");
+      expect(audit).toContain("inQuantity 0 -> 10");
+    });
+
+    it("mirrors the same record into app-*.log with an [AUDIT] tag and a level derived from severity", async () => {
+      LogService.audit("sync.batch.discard", "被放弃的 ops: ledgerItem:upsert:x", undefined, "error");
+      await flushIo();
+
+      const app = readByPrefix("app-");
+      expect(app).toContain("[ERROR] [AUDIT] sync.batch.discard");
+      expect(app).toContain("被放弃的 ops: ledgerItem:upsert:x");
+    });
+
+    it("rolls the audit stream over on its own size limit (separate sequence from the app stream)", async () => {
+      // beforeEach 把上限设成约 1KB。两次写之间等一轮 IO，确保第一条已落盘、第二条计算滚动时能看到超限的文件体积。
+      LogService.audit("bulk", "x".repeat(2000));
+      await flushIo();
+      LogService.audit("after.rollover", "second audit entry");
+      await flushIo();
+
+      const auditFiles = fs.readdirSync(process.env.LOCAL_LOG_DIR!).filter((f) => f.startsWith("audit-") && f.endsWith(".log"));
+      expect(auditFiles.some((f) => /^audit-.*\.\d+\.log$/.test(f))).toBe(true);
+      expect(readByPrefix("audit-")).toContain("second audit entry");
+    });
+
+    it("a plain write() to the app stream does not roll the audit stream", async () => {
+      LogService.write("INFO", "M", "y".repeat(2000)); // 只写运行日志流
+      await flushIo();
+      LogService.audit("small", "tiny audit entry"); // 审计流此时仍是全新的
+      await flushIo();
+
+      const auditFiles = fs.readdirSync(process.env.LOCAL_LOG_DIR!).filter((f) => f.startsWith("audit-") && f.endsWith(".log"));
+      expect(auditFiles.some((f) => /\.\d+\.log$/.test(f))).toBe(false);
+      expect(readByPrefix("audit-")).toContain("tiny audit entry");
+    });
+
+    it("does not throw when the audit target is broken", () => {
+      LogService.auditActiveFilePath = path.join(tmpDir, "invalid\0path");
+      expect(() => LogService.audit("x", "y")).not.toThrow();
+    });
+  });
+
+  describe("fmt / diffFields helpers", () => {
+    it("fmt renders empty-ish values as ∅ and quotes strings", () => {
+      expect(LogService.fmt(undefined)).toBe("∅");
+      expect(LogService.fmt(null)).toBe("∅");
+      expect(LogService.fmt("")).toBe("∅");
+      expect(LogService.fmt("宾县")).toBe('"宾县"');
+      expect(LogService.fmt(0)).toBe("0");
+      expect(LogService.fmt(3.5)).toBe("3.5");
+    });
+
+    it("diffFields lists only changed fields as `field old -> new`", () => {
+      const before = { inQuantity: 0, inPrice: 0, supplier: "" };
+      const after = { inQuantity: 10, inPrice: 0, supplier: "宾县家家乐" };
+      expect(LogService.diffFields(before, after, ["inQuantity", "inPrice", "supplier"]))
+        .toBe('inQuantity 0 -> 10, supplier ∅ -> "宾县家家乐"');
+    });
+
+    it("diffFields returns a no-change marker when nothing differs", () => {
+      expect(LogService.diffFields({ a: 1 }, { a: 1 }, ["a"])).toBe("(无字段变化)");
+    });
+  });
 });

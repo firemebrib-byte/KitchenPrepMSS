@@ -10,6 +10,12 @@
 import { Printer, X } from "lucide-react";
 import { FoodCategory } from "../../types/types.ts";
 import { PrepReportService } from "../../services/store.ts";
+import { UNCATEGORIZED_CATEGORY_KEY, UNCATEGORIZED_CATEGORY_LABEL } from "../../constants/constants.ts";
+
+/** 打印勾选弹窗里可选的大类（6 个默认大类 + “未分类”兜底桶） */
+const PRINTABLE_CATEGORY_KEYS = [
+  "VEGETABLE", "GRAIN_OIL", "SEASONING", "MEAT", "LOW_CONSUMP", "FRUIT", UNCATEGORIZED_CATEGORY_KEY
+];
 
 interface LedgerPrintModalProps {
   isOpen: boolean;
@@ -52,10 +58,9 @@ export function LedgerPrintModal({
             <div className="flex gap-2 text-[10px] font-bold">
               <button
                 type="button"
-                onClick={() => setSelectedPrintCategories([
-                  "VEGETABLE", "GRAIN_OIL", "SEASONING",
-                  "MEAT", "LOW_CONSUMP", "FRUIT"
-                ].filter((cat) => printableCategories.has(cat)))}
+                onClick={() => setSelectedPrintCategories(
+                  PRINTABLE_CATEGORY_KEYS.filter((cat) => printableCategories.has(cat))
+                )}
                 className="text-emerald-600 hover:text-emerald-700 underline cursor-pointer"
               >
                 全选
@@ -79,7 +84,8 @@ export function LedgerPrintModal({
               { key: "SEASONING", label: PrepReportService.getActiveCategories().find(c => c.key === "SEASONING")?.label || "SEASONING", color: "accent-orange-600" },
               { key: "MEAT", label: PrepReportService.getActiveCategories().find(c => c.key === "MEAT")?.label || "MEAT", color: "accent-red-600" },
               { key: "LOW_CONSUMP", label: PrepReportService.getActiveCategories().find(c => c.key === "LOW_CONSUMP")?.label || "LOW_CONSUMP", color: "accent-slate-600" },
-              { key: "FRUIT", label: PrepReportService.getActiveCategories().find(c => c.key === "FRUIT")?.label || "FRUIT", color: "accent-pink-600" }
+              { key: "FRUIT", label: PrepReportService.getActiveCategories().find(c => c.key === "FRUIT")?.label || "FRUIT", color: "accent-pink-600" },
+              { key: UNCATEGORIZED_CATEGORY_KEY, label: UNCATEGORIZED_CATEGORY_LABEL, color: "accent-gray-500" }
             ].map((item) => {
               const isChecked = selectedPrintCategories.includes(item.key);
               const isPrintable = printableCategories.has(item.key);

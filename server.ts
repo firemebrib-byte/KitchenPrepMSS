@@ -43,13 +43,19 @@ app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 import { RequestContext, StorageService } from "./server/storageService.ts";
 
+/** 会改动数据、需要进运行日志审计的 HTTP 方法 */
+const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
 // 记录请求日志中转器
 app.use((req, res, next) => {
   console.log(`[HTTP LOG] [${new Date().toISOString()}] ${req.method} ${req.url}`);
-  
+
   const baseVersionStr = req.header("X-Base-Version");
   const baseVersion = baseVersionStr ? parseInt(baseVersionStr, 10) : undefined;
-  
+
+  // 每个请求分配一个短随机 ID，串联同一次请求在运行日志与数据审计日志里的多条记录
+  const reqId = Math.random().toString(36).slice(2, 10);
+
   // 拦截所有的 res.json 响应，在发出前附带最新的数据库版本号
   const originalJson = res.json;
   res.json = function (body) {
@@ -58,9 +64,27 @@ app.use((req, res, next) => {
     }
     return originalJson.call(this, body);
   };
-  
-  // 将基础版本号存入全局上下文，供底层的 withWriteLock 提取校验
-  RequestContext.run({ baseVersion }, () => {
+
+  // 变更类请求：入口与最终响应状态都进运行日志，便于按时间点核对"这一刻发起了哪个写请求、结果是成功还是被 409/400/500 拒绝"
+  if (MUTATING_METHODS.has(req.method)) {
+    const startedAt = Date.now();
+    LogService.write(
+      "INFO",
+      "HTTP",
+      `req=${reqId} ${req.method} ${req.url} 收到写请求 baseVer=${baseVersion ?? "∅"}`
+    );
+    res.on("finish", () => {
+      const level = res.statusCode >= 500 ? "ERROR" : res.statusCode >= 400 ? "WARN" : "INFO";
+      LogService.write(
+        level,
+        "HTTP",
+        `req=${reqId} ${req.method} ${req.url} 响应 ${res.statusCode} 用时 ${Date.now() - startedAt}ms`
+      );
+    });
+  }
+
+  // 将请求上下文存入全局，供底层的 withWriteLock 校验版本、各数据变更方法组装审计日志的 ctx 段
+  RequestContext.run({ baseVersion, reqId, method: req.method, url: req.url }, () => {
     next();
   });
 });

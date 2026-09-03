@@ -14,6 +14,7 @@ import { RawMaterialsDictService } from "../../services/rawMaterialDict.ts";
 import { matchPinyin } from "../../utils.ts";
 import { PrepReportService } from "../../services/store.ts";
 import { FoodCategory } from "../../types/types.ts";
+import { resolveLedgerItemCategory, UNCATEGORIZED_CATEGORY_KEY, UNCATEGORIZED_CATEGORY_LABEL } from "../../constants/constants.ts";
 import {
   X,
   Search,
@@ -121,21 +122,16 @@ export function InventoryPanel({ onClose }: InventoryPanelProps) {
    * @description 将 LedgerItem 列表转换为库存展示行数据
    */
   const inventoryRows = useMemo<InventoryRow[]>(() => {
-    const dictItems = RawMaterialsDictService.getItems();
-
+    // [字典与台账解耦] 不再要求原料存在于字典——库存总览展示所有台账原料项。
     return ledgerItems
-      .filter((item) => {
-        // 防脏校验：原料必须存在于后台字典中
-        return dictItems.some((d) => d.name === item.name);
-      })
       .map((item) => {
-        // 从字典中查询分类和规格
-        const dictEntry = dictItems.find((d) => d.name === item.name);
-        const category = dictEntry?.category ?? null;
+        // 分类走 item.category 快照，缺失回退字典、再缺失归“未分类”
+        const resolved = resolveLedgerItemCategory(item, (n) => RawMaterialsDictService.getCategoryForMaterial(n));
+        const category = resolved === UNCATEGORIZED_CATEGORY_KEY ? null : resolved;
         const dynamicLabel = PrepReportService.getActiveCategories().find(c => c.key === category)?.label;
         const categoryLabel = category
           ? (dynamicLabel || "未知分类")
-          : "未知分类";
+          : UNCATEGORIZED_CATEGORY_LABEL;
 
         // 读取后端直接发来的历史累计总和（不受懒加载被截断月份影响）
         const totalIn = item.historicalTotalIn ?? 0;

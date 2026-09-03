@@ -162,10 +162,12 @@ describe("SyncHelper", () => {
         await vi.advanceTimersByTimeAsync(200);
       }
 
-      expect(fetchSpy.mock.calls.length).toBeLessThanOrEqual(4);
-      const callsAfterGivingUp = fetchSpy.mock.calls.length;
+      // 只数打到增量保存端点的请求：彻底放弃时会额外向 /api/log 上报一条"数据丢失"审计，不计入重试次数
+      const saveCalls = () => fetchSpy.mock.calls.filter(([url]) => String(url).includes("/api/storage/save"));
+      expect(saveCalls().length).toBeLessThanOrEqual(4);
+      const callsAfterGivingUp = saveCalls().length;
       await vi.advanceTimersByTimeAsync(1000);
-      expect(fetchSpy.mock.calls.length).toBe(callsAfterGivingUp);
+      expect(saveCalls().length).toBe(callsAfterGivingUp);
     });
   });
 

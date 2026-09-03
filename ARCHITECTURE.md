@@ -58,6 +58,7 @@ KPMSS/
 ├── 提示词历史记录.md / prompt_history.md   # AI 提示词变更历史（仅追加，不改历史）
 ├── 部署指南.md                  # 单机离线部署操作手册（权威部署文档）
 ├── SQLite迁移规划.md            # SQLite 迁移三阶段规划与实施记录（历史参考文档）
+├── LOGGING.md                  # 日志与数据审计约定（新增/改动落库功能必须按此补日志，见八）
 └── ARCHITECTURE.md              # 本文档
 ```
 
@@ -218,3 +219,18 @@ npm run test:coverage  # 生成覆盖率报告
 - 后端 `StorageService`/`LogService` 在模块加载时从 `process.env.*` 读取路径并绑定到 `private static` 字段；测试通过 `vi.resetModules()` + 动态 `import()` + 临时目录（`fs.mkdtempSync`）为每个用例拿到全新绑定的类实例，杜绝相互污染，也**杜绝任何测试清理逻辑触碰真实的 `data/` 目录**。
 - 涉及"删除唯一一行数据"的测试需额外造一条不相关的"锚点"数据（如多加一本台账），避免规范化表结构全空时 `GET /load` 退化返回首启空壳 `{}`，无法验证"确实只删了目标行"（已知边界行为，详见 `storageService.test.ts`）。
 - 阶段A/B/C迁移后新增的 REST 集成测试统一使用镜像后端语义的轻量假 `fetch` 路由（如 `fakeLedgerFetch`/`fakePrepReportFetch`）支撑前端 service 测试文件里大量"先增后改/先增后删"的多步测试序列，而非逐个用例手写 canned 响应。
+
+## 八、日志与数据审计
+
+服务端有两条独立归档流写入 `data/logs/`：`app-YYYY-MM-DD.log`（运行日志，`LogService.write`）与 `audit-YYYY-MM-DD.log`（**数据审计**，`LogService.audit`——只记「某条数据在哪一刻由哪个请求从什么值改成了什么值 / 在哪一步被丢弃」，是数据丢失排查的首要依据）。`StorageService` 的**每一个落库方法**都会在成功/失败后写一条 `audit` 记录（逐字段 `旧值 -> 新值`、级联影响、库存与累计重算前后值），`server.ts` 中间件为每个写请求分配 `reqId` 串联两条流。前端 `SyncHelper` 把"增量同步彻底放弃（数据丢失）""服务器快照覆盖了未落盘的本地录入"经 `LogBroker.publish` 上报进 `app-*.log`。
+
+**新增或修改任何会落库的功能，必须按 [LOGGING.md](LOGGING.md) 的检查清单补齐 `LogService.audit(...)`**（含失败/跳过分支）。Code review 把这一项作为必查项。
+
+## 九、原料字典与台账解耦（master data / transactional data 分离）
+
+原料字典（`raw_materials_dict`）是**主数据/建议清单**，只服务于台账录入时的联想与默认值；台账采购原料项（`ledger_items`）及其逐日流水是**交易数据**。两者生命周期彻底分开：
+
+- `ledger_items` 增加了 **`category` 快照列**：新建采购原料项时从字典按 `name` 抄一次分类，之后与字典独立。`name`/`unit`/`spec` 本就已在 `ledger_items` 上，加上 `category` 后台账项**自描述**，展示层不再回字典按 name 反查分类。旧库首启时 `getDb()` 幂等 `ALTER TABLE ... ADD COLUMN category` 并按字典回填一次。
+- **字典改名/删除不再级联台账**：`updateRawMaterial`/`deleteRawMaterial` 只写 `raw_materials_dict` 一张表，台账里的同名采购项与全部历史流水原样保留。（此前的级联会把"删除字典条目"变成"物理删除数月采购记录"，且弹窗文案与实际行为相反。）
+- 展示层对"分类快照为空"的孤立项（字典查不到、或建项在升级前）统一归入 **未分类**（`UNCATEGORIZED_CATEGORY_KEY`，见 `src/constants/constants.ts` 的 `resolveLedgerItemCategory`），不会再从总表/合计汇总/打印里消失。
+- 已删除的死代码：`LedgerService.cascadeUpdateMaterial` / `cascadeDeleteMaterial`。

@@ -147,6 +147,8 @@ export function useAppData(): UseAppDataResult {
 
           setIsLoading(false);
           SyncHelper.setInitialized(true);
+          // 上次因连续重试失败而暂存在本地的增量操作，现在初始化完成、版本号已对齐，补传一次
+          SyncHelper.replayStashedOps();
           LogBroker.publish("INFO", "App", "系统已完成人群大类配置、台账以及原料大字典服务数据模型的全局并行加载初始化");
         }
       }, 400);

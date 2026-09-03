@@ -10,6 +10,7 @@
 import { Ledger, LedgerItem } from "../../types/ledgerTypes.ts";
 import { FoodCategory } from "../../types/types.ts";
 import { LEDGER_PRINT_STYLE1_CONFIG } from "../../constants/ledgerConstants.ts";
+import { resolveLedgerItemCategory } from "../../constants/constants.ts";
 
 /**
  * @description 购销总表打印预览模板组件入参接口
@@ -47,8 +48,9 @@ export function LedgerPrintStyle1({
   // 若只按分类过滤，会把该分类下"曾经采购过但当天毫无动静"的原料也当作空白行打印出来，
   // 导致登记总表看起来像是把整个分类的全部历史原料都列了出来，而非当天真实发生的记账内容
   const toPrintItems = currentLedgerItems.filter((item) => {
-    const dictItem = dictItems.find(d => d.name === item.name);
-    if (!dictItem || !selectedPrintCategories.includes(dictItem.category)) return false;
+    // [字典与台账解耦] 分类走 item.category 快照，字典查不到归“未分类”；只有勾选了对应大类才打印。
+    const cat = resolveLedgerItemCategory(item, (n) => dictItems.find(d => d.name === n)?.category ?? null);
+    if (!selectedPrintCategories.includes(cat)) return false;
     const record = item.dailyRecords[selectedDate];
     return !!record && (record.inQuantity > 0 || record.outQuantity > 0);
   });
