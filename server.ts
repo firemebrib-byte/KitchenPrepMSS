@@ -152,8 +152,30 @@ async function bootstrap() {
   // 绑定宿主 0.0.0.0 以绕过沙箱
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[KITCHEN SYSTEM LIVE] 服务就绪! 请访问外部绑定端口层: http://localhost:${PORT}`);
+    // 启动即备份一份，之后按 KPMSS_BACKUP_INTERVAL_HOURS 定时备份（仅本地 SQLite 模式；可用 KPMSS_DISABLE_AUTO_BACKUP=1 关闭）
+    StorageService.startAutoBackup();
   });
 }
+
+/**
+ * @description 优雅停机：收到 SIGTERM/SIGINT 时，先把 WAL 全量 checkpoint 回主库并关闭 SQLite 连接，
+ * 再退出进程。否则被 kill 后 kpmss.sqlite 主库可能长期落后于 -wal，裸拷贝会拿到陈旧/空库。
+ */
+let __shuttingDown = false;
+const gracefulShutdown = (signal: string) => {
+  if (__shuttingDown) return;
+  __shuttingDown = true;
+  console.log(`[SYSTEM SHUTDOWN] 收到 ${signal}，正在 checkpoint WAL 并安全关闭数据库…`);
+  try {
+    LogService.write("WARN", "SystemShutdown", `进程收到 ${signal}，执行优雅停机（WAL checkpoint + 关闭连接）`);
+    StorageService.checkpointAndClose();
+  } catch (err) {
+    console.error("[SYSTEM SHUTDOWN] 优雅停机收尾出错（仍将退出）:", err);
+  }
+  process.exit(0);
+};
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 // 监听进程级别未捕获异常
 process.on("uncaughtException", (err) => {

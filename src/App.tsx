@@ -15,7 +15,7 @@ import { LogBroker, computeLedgerDailyAmountsByGroup, computeLedgerHistoricalInA
 import { ErrorBoundary } from "./components/shared/ErrorBoundary.tsx";
 import { useAppAuth } from "./hooks/useAppAuth.ts";
 import { useAppData } from "./hooks/useAppData.ts";
-import { SyncHelper } from "./services/syncHelper.ts";
+import { useRangeLoad } from "./hooks/useRangeLoad.ts";
 
 const AdminBackend = lazy(() => import("./components/admin/AdminBackend.tsx").then(m => ({ default: m.AdminBackend })));
 const LedgerSystem = lazy(() => import("./components/ledger/LedgerSystem.tsx").then(m => ({ default: m.LedgerSystem })));
@@ -32,7 +32,8 @@ import {
   Menu,
   X,
   CalendarDays,
-  Package
+  Package,
+  AlertTriangle
 } from "lucide-react";
 
 /**
@@ -126,19 +127,11 @@ export default function App() {
   const selectedMonth = parseInt(selectedDate.split("-")[1], 10);
 
   // ================= 按月懒加载触发器 (针对台账每日流水) =================
-  useEffect(() => {
-    // 只有当 SyncHelper 初始化完成后（即跳过首屏初始化拉取），才因为账期变动而触发增量拉取
-    // 这里依赖 SyncHelper 的 loadedStartDate/End 判断是否真正发请求
-    const yStr = String(selectedYear);
-    const mStr = String(selectedMonth).padStart(2, "0");
-    const requiredStart = `${yStr}-${mStr}-01`;
-    const requiredEnd = `${yStr}-${mStr}-${new Date(selectedYear, selectedMonth, 0).getDate()}`;
-    
-    // 我们在此触发 refreshNow 即可，内部会校验缓存和 bypassCache
-    SyncHelper.refreshNow(requiredStart, requiredEnd).catch(err => {
-      console.error("切换查看账期懒加载失败:", err);
-    });
-  }, [selectedYear, selectedMonth]);
+  // 切换查看账期时，向服务器补拉该月区间数据；期间 periodLoad.loading=true → 下方 <main> 内渲染阻断式遮罩，
+  // 确保"拉取成功、数据加载完整"后用户才能继续操作；失败时遮罩保持并提供重试（见 useRangeLoad）。
+  const periodStart = `${selectedYear}-${String(selectedMonth).padStart(2, "0")}-01`;
+  const periodEnd = `${selectedYear}-${String(selectedMonth).padStart(2, "0")}-${new Date(selectedYear, selectedMonth, 0).getDate()}`;
+  const periodLoad = useRangeLoad(periodStart, periodEnd, [selectedYear, selectedMonth]);
 
   /** 库存总览面板显示状态 */
   const [isInventoryOpen, setIsInventoryOpen] = useState<boolean>(false);
@@ -625,7 +618,33 @@ export default function App() {
         </aside>
 
         {/* 核心右侧工作记账盘与二级品类选项页签 */}
-        <main className="flex-1 flex flex-col min-w-0 bg-[#f8fafc]">
+        <main className="flex-1 flex flex-col min-w-0 bg-[#f8fafc] relative">
+          {/* 切换查看账期时的阻断式加载遮罩：拉取成功前覆盖整个工作区并拦截点击，确保用户不会对着不完整的数据操作 */}
+          {(periodLoad.loading || periodLoad.error) && (
+            <div className="absolute inset-0 z-40 bg-white/75 backdrop-blur-[1.5px] flex flex-col items-center justify-center gap-3 select-none cursor-wait animate-fade-in">
+              {periodLoad.error ? (
+                <>
+                  <AlertTriangle className="text-amber-500" size={28} />
+                  <div className="text-[13px] font-bold text-slate-700 max-w-xs text-center px-4">{periodLoad.error}</div>
+                  <button
+                    onClick={periodLoad.retry}
+                    className="mt-1 inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[12px] font-bold px-4 py-1.5 rounded-lg shadow-sm transition-colors cursor-pointer"
+                  >
+                    <RefreshCw size={13} />
+                    重新加载
+                  </button>
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="animate-spin text-emerald-500" size={26} />
+                  <div className="text-[13px] font-semibold text-slate-600">
+                    正在加载 {selectedYear} 年 {selectedMonth} 月账期数据…
+                  </div>
+                  <div className="text-[11px] text-slate-400">加载完成前请勿操作，以免数据不完整</div>
+                </>
+              )}
+            </div>
+          )}
           {activeGroup === "LEDGER" ? (
             <Suspense fallback={
               <div className="flex-1 flex flex-col items-center justify-center space-y-4 p-12 text-slate-500 bg-white m-6 rounded-xl border border-slate-200 shadow-sm">

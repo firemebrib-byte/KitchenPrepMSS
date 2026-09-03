@@ -223,12 +223,14 @@ export class SyncHelper {
    * 所有拉取都排进 loadChain 串行执行（见该字段说明），杜绝多个 effect 并发触发时响应乱序落地互相覆盖。
    * @param {string} [startDate] 可选。需要拉取流水的起始日期 (YYYY-MM-DD)
    * @param {string} [endDate] 可选。需要拉取流水的结束日期 (YYYY-MM-DD)
+   * @param {{ strict?: boolean }} [opts] strict=true 时，网络失败/非 2xx 会 reject 给调用方（用于用户主动切换账期等
+   *        强一致场景，需要明确"拉取成功"才放行操作）；默认 false，保持"失败静默 return null"的既有行为。
    * @returns {Promise<BackendData | null>} 获取到的后端数据，若返回 304 则返回 null (或特殊标记)
    */
-  public static loadFromServer(startDate?: string, endDate?: string): Promise<BackendData | null> {
+  public static loadFromServer(startDate?: string, endDate?: string, opts?: { strict?: boolean }): Promise<BackendData | null> {
     const run = this.loadChain.then(
-      () => this.loadFromServerInner(startDate, endDate),
-      () => this.loadFromServerInner(startDate, endDate)
+      () => this.loadFromServerInner(startDate, endDate, opts),
+      () => this.loadFromServerInner(startDate, endDate, opts)
     );
     // 链上只保留“已完成”信号，吞掉结果与异常，避免某次失败的拉取阻断后续排队的拉取
     this.loadChain = run.then(() => undefined, () => undefined);
@@ -243,9 +245,10 @@ export class SyncHelper {
    *  3. 只有真正扩了窗（或首次带区间拉取）才附加 bypassCache，其余情况交给 X-Base-Version 走 304 快路径。
    * @param {string} [reqStart] 调用方请求的起始日期
    * @param {string} [reqEnd] 调用方请求的结束日期
+   * @param {{ strict?: boolean }} [opts] strict=true 时把真实失败向上抛（见 loadFromServer 说明）
    * @returns {Promise<BackendData | null>}
    */
-  private static async loadFromServerInner(reqStart?: string, reqEnd?: string): Promise<BackendData | null> {
+  private static async loadFromServerInner(reqStart?: string, reqEnd?: string, opts?: { strict?: boolean }): Promise<BackendData | null> {
     try {
       // 不带区间参数：级联后的主动刷新，按当前已加载区间重拉并强制绕过 304
       const isForceRefresh = !reqStart || !reqEnd;
@@ -305,6 +308,9 @@ export class SyncHelper {
       return data;
     } catch (err) {
       console.error("[SYNC HELPER] 从后端加载数据失败:", err);
+      // strict 模式（用户主动切换账期等强一致场景）：把真实的网络/5xx 失败抛给调用方去提示并重试，
+      // 不再静默 return null 让 UI 用可能不完整的旧数据继续渲染。
+      if (opts?.strict) throw (err instanceof Error ? err : new Error(String(err)));
       return null;
     }
   }
@@ -372,12 +378,13 @@ export class SyncHelper {
    * 按当前已加载区间强制刷新），也用于按需懒加载切换日期区间时刷新数据（带区间：与已加载区间取并集）。
    * 底层 loadFromServer 已在 loadChain 上串行执行且区间只扩不缩，因此并发的多次 refreshNow 不会互相覆盖，
    * 最终落地的一定是最宽区间的数据。
+   * @param {{ strict?: boolean }} [opts] strict=true 时，拉取失败会 reject（调用方据此提示并重试），而非静默返回 false
    * @returns {Promise<boolean>} 本次是否真的检测到并应用了变化
    */
-  public static async refreshNow(startDate?: string, endDate?: string): Promise<boolean> {
-    const freshData = await SyncHelper.loadFromServer(startDate, endDate);
+  public static async refreshNow(startDate?: string, endDate?: string, opts?: { strict?: boolean }): Promise<boolean> {
+    const freshData = await SyncHelper.loadFromServer(startDate, endDate, opts);
     if (!freshData) {
-      // 可能是 304，也可能是错误
+      // 可能是 304（数据已是最新），也可能是非 strict 模式下被静默的错误
       return false;
     }
     return SyncHelper.applyFreshData(freshData);

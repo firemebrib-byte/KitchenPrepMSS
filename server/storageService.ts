@@ -93,6 +93,8 @@ export class StorageService {
    */
   public static async clearDailyRecords(): Promise<boolean> {
     return StorageService.withWriteLock(async () => {
+      // 高危不可逆操作：删之前先存一份完整快照。备份失败则整个清空操作中止（宁可不清，也不能没备份就清）。
+      const backupPath = await StorageService.snapshotBackup("before-clear-records");
       try {
         if (StorageService.storageType === "local") {
           const db = StorageService.getDb();
@@ -103,7 +105,7 @@ export class StorageService {
           db.prepare("DELETE FROM ledger_items").run();
           LogService.audit(
             "system.clearDailyRecords",
-            `一键清空所有台账流水：物理删除 ledger_items ${before.items} 行、ledger_item_daily_records ${before.records} 行（保留台账/人群/大类/字典配置）`,
+            `一键清空所有台账流水：物理删除 ledger_items ${before.items} 行、ledger_item_daily_records ${before.records} 行（保留台账/人群/大类/字典配置）| 删前快照: ${backupPath ? path.basename(backupPath) : "(无)"}`,
             StorageService.auditCtx(),
             "warn"
           );
@@ -132,7 +134,7 @@ export class StorageService {
           });
           LogService.audit(
             "system.clearDailyRecords",
-            `一键清空所有台账流水（COS 模式）：清空 ledgerItems ${removedCount} 项及其全部逐日流水`,
+            `一键清空所有台账流水（COS 模式）：清空 ledgerItems ${removedCount} 项及其全部逐日流水（COS 多副本冗余，未生成本地快照）`,
             StorageService.auditCtx(),
             "warn"
           );
@@ -161,6 +163,130 @@ export class StorageService {
     }
     const db = StorageService.getDb();
     await db.backup(destinationPath);
+  }
+
+  /** 备份快照目录（本地模式）：<localDataDir>/backups */
+  private static get backupDir(): string {
+    return path.join(StorageService.localDataDir, "backups");
+  }
+
+  /** 自动备份定时器句柄，防止重复启动 */
+  private static autoBackupTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * @description 生成一份一致性数据库快照到 <localDataDir>/backups/，并按 KPMSS_BACKUP_KEEP（默认 30）滚动清理旧快照。
+   * 用 better-sqlite3 的在线 backup 接口，天然处理 WAL 未落盘的页；本地模式才有意义，COS 模式直接返回 null（云端多副本冗余）。
+   * **失败会抛异常**：高危删除前的保护性备份调用方据此中止删除（宁可不删，也不能没备份就删）。
+   * @param {string} reason 备份缘由，写进文件名（如 before-clear-records / startup / scheduled）
+   * @returns {Promise<string | null>} 生成的备份文件绝对路径；COS 模式为 null
+   */
+  public static async snapshotBackup(reason: string): Promise<string | null> {
+    if (StorageService.storageType !== "local") return null;
+
+    const safeReason = (reason || "manual").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "manual";
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+
+    try {
+      if (!fs.existsSync(StorageService.backupDir)) {
+        fs.mkdirSync(StorageService.backupDir, { recursive: true });
+      }
+      const dest = path.join(StorageService.backupDir, `kpmss_${stamp}_${safeReason}.sqlite`);
+      await StorageService.getDb().backup(dest);
+
+      // 滚动清理：只保留最新 keep 份 kpmss_*.sqlite
+      const keep = Math.max(1, parseInt(process.env.KPMSS_BACKUP_KEEP || "30", 10) || 30);
+      let pruned = 0;
+      try {
+        const files = fs.readdirSync(StorageService.backupDir)
+          .filter((f) => /^kpmss_.*\.sqlite$/.test(f))
+          .map((f) => ({ f, t: fs.statSync(path.join(StorageService.backupDir, f)).mtimeMs }))
+          .sort((a, b) => b.t - a.t);
+        for (const { f } of files.slice(keep)) {
+          fs.unlinkSync(path.join(StorageService.backupDir, f));
+          pruned++;
+        }
+      } catch (pruneErr) {
+        console.error("[STORAGE BACKUP] 清理旧备份失败（忽略）:", pruneErr);
+      }
+
+      const sizeKb = (() => { try { return Math.round(fs.statSync(dest).size / 1024); } catch { return -1; } })();
+      LogService.audit(
+        "system.backup",
+        `已生成数据库快照 ${path.basename(dest)}（${sizeKb} KB，缘由 ${safeReason}）${pruned ? `，滚动清理 ${pruned} 份旧快照` : ""}`,
+        StorageService.auditCtx(),
+        "info"
+      );
+      return dest;
+    } catch (err: any) {
+      LogService.audit(
+        "system.backup.fail",
+        `生成数据库快照失败（缘由 ${safeReason}）: ${err?.message || String(err)}`,
+        StorageService.auditCtx(),
+        "error"
+      );
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+  }
+
+  /**
+   * @description snapshotBackup 的"永不抛"包装：用于启动时/定时的自动备份——备份失败只记日志，不影响服务运行。
+   * @param {string} reason 备份缘由
+   * @returns {Promise<string | null>}
+   */
+  private static async snapshotBackupSafe(reason: string): Promise<string | null> {
+    try {
+      return await StorageService.snapshotBackup(reason);
+    } catch (err: any) {
+      console.error(`[STORAGE BACKUP] 自动备份失败（缘由 ${reason}，已忽略）:`, err?.message || err);
+      return null;
+    }
+  }
+
+  /**
+   * @description 启动自动备份：进程起来后立即备一份（startup），随后每隔 KPMSS_BACKUP_INTERVAL_HOURS 小时（默认 24）
+   * 再备一份（scheduled）。设置 KPMSS_DISABLE_AUTO_BACKUP=1 可完全关闭。仅本地模式生效，可安全重复调用。
+   */
+  public static startAutoBackup(): void {
+    if (StorageService.storageType !== "local") return;
+    if (process.env.KPMSS_DISABLE_AUTO_BACKUP === "1" || process.env.KPMSS_DISABLE_AUTO_BACKUP === "true") {
+      console.log("[STORAGE BACKUP] 已通过 KPMSS_DISABLE_AUTO_BACKUP 关闭自动备份");
+      return;
+    }
+    if (StorageService.autoBackupTimer) return;
+
+    void StorageService.snapshotBackupSafe("startup");
+
+    const hours = Math.max(1, parseFloat(process.env.KPMSS_BACKUP_INTERVAL_HOURS || "24") || 24);
+    StorageService.autoBackupTimer = setInterval(() => {
+      void StorageService.snapshotBackupSafe("scheduled");
+    }, hours * 3600 * 1000);
+    // 不要因为这个定时器而让进程无法自然退出
+    if (typeof StorageService.autoBackupTimer.unref === "function") {
+      StorageService.autoBackupTimer.unref();
+    }
+    console.log(`[STORAGE BACKUP] 自动备份已启用：启动即备一份，此后每 ${hours} 小时一份，保留最新 ${process.env.KPMSS_BACKUP_KEEP || "30"} 份于 ${StorageService.backupDir}`);
+  }
+
+  /**
+   * @description 优雅停机收尾（同步）：把 WAL 全量 checkpoint 回主库并关闭连接，避免进程被 kill 后主库文件长期落后、
+   * 裸拷贝 kpmss.sqlite 得到陈旧/空库。仅本地模式且连接已建立时执行；尽力而为，失败只记录不抛。
+   */
+  public static checkpointAndClose(): void {
+    if (StorageService.storageType !== "local" || !StorageService.db) return;
+    try {
+      StorageService.db.pragma("wal_checkpoint(TRUNCATE)");
+    } catch (err) {
+      console.error("[STORAGE SHUTDOWN] WAL checkpoint 失败（忽略）:", err);
+    }
+    try {
+      StorageService.db.close();
+      StorageService.db = null;
+      console.log("[STORAGE SHUTDOWN] 数据库已 checkpoint 并安全关闭");
+    } catch (err) {
+      console.error("[STORAGE SHUTDOWN] 关闭数据库连接失败（忽略）:", err);
+    }
   }
 
   /**
@@ -1491,6 +1617,8 @@ export class StorageService {
       if (!ledger) {
         throw new Error("找不到待删除的台账");
       }
+      // 会连根删掉整本台账及其全部逐日流水：删前先存一份快照。备份失败则中止删除。
+      const backupPath = await StorageService.snapshotBackup(`before-delete-ledger-${ledger.id}`);
       const ledgerItems: LedgerItem[] = current.ledgerItems ?? [];
       // 关联子项按**大小写不敏感**匹配（与 deleteGroup 一致）——历史上出现过 ledgerId 与 ledger.id 大小写不一致的
       // 脏数据，用严格 === 会漏删子项，留下孤儿 ledger_items / 逐日流水行（schema 无 FK 级联）。
@@ -1517,7 +1645,7 @@ export class StorageService {
       }
       LogService.audit(
         "ledger.delete",
-        `物理删除台账 id=${ledger.id} name=${LogService.fmt(ledger.name)} | 级联删除原料项 ${removedItems.length} 个、逐日流水合计 ${dayStats.count} 条${dayStats.count ? ` (${dayStats.minDate} ~ ${dayStats.maxDate})` : ""}${linkedGroup ? `、一级人群配置 key=${linkedGroup.key}` : ""} | 被删原料项: [${removedItems.map((i) => `${i.id}(${i.name})`).join(", ")}]`,
+        `物理删除台账 id=${ledger.id} name=${LogService.fmt(ledger.name)} | 级联删除原料项 ${removedItems.length} 个、逐日流水合计 ${dayStats.count} 条${dayStats.count ? ` (${dayStats.minDate} ~ ${dayStats.maxDate})` : ""}${linkedGroup ? `、一级人群配置 key=${linkedGroup.key}` : ""} | 删前快照: ${backupPath ? path.basename(backupPath) : "(无)"} | 被删原料项: [${removedItems.map((i) => `${i.id}(${i.name})`).join(", ")}]`,
         StorageService.auditCtx(),
         "warn"
       );
@@ -2021,6 +2149,8 @@ export class StorageService {
       if (target?.isDefault) {
         throw new Error(`「${target.label}」是系统默认人群，不允许删除，如需调整可编辑其名称或图标`);
       }
+      // 会连带删掉对应台账及其全部逐日流水：删前先存一份快照。备份失败则中止删除。
+      const backupPath = await StorageService.snapshotBackup(`before-delete-group-${target ? target.key : upperKey}`);
 
       // 按人群实际行的 key 下删除 op（命中时），而不是重新大写猜一个——避免历史上存在非大写 key 时删不掉
       const ops: SyncOp[] = [{ entity: "activeGroup", op: "delete", key: target ? target.key : upperKey }];
@@ -2045,7 +2175,7 @@ export class StorageService {
       }
       LogService.audit(
         "config.group.delete",
-        `删除一级人群 key=${target ? target.key : upperKey} label=${LogService.fmt(target?.label)} | 级联删除对应台账${ledger ? ` id=${ledger.id}` : "(无)"}、原料项 ${cascadedItems.length} 个、逐日流水合计 ${dayStats.count} 条${dayStats.count ? ` (${dayStats.minDate} ~ ${dayStats.maxDate})` : ""}${cascadedItems.length ? ` | 被删原料项: [${cascadedItems.map((i) => `${i.id}(${i.name})`).join(", ")}]` : ""}`,
+        `删除一级人群 key=${target ? target.key : upperKey} label=${LogService.fmt(target?.label)} | 级联删除对应台账${ledger ? ` id=${ledger.id}` : "(无)"}、原料项 ${cascadedItems.length} 个、逐日流水合计 ${dayStats.count} 条${dayStats.count ? ` (${dayStats.minDate} ~ ${dayStats.maxDate})` : ""} | 删前快照: ${backupPath ? path.basename(backupPath) : "(无)"}${cascadedItems.length ? ` | 被删原料项: [${cascadedItems.map((i) => `${i.id}(${i.name})`).join(", ")}]` : ""}`,
         StorageService.auditCtx(),
         ledger || cascadedItems.length ? "warn" : "info"
       );
