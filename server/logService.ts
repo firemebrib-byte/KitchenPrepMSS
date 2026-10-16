@@ -64,13 +64,6 @@ export class LogService {
   }
 
   /**
-   * @description 获取当前日期（Asia/Shanghai 时区）对应的运行日志文件基础名，如 app-2026-07-03
-   */
-  private static getTodayBaseName(): string {
-    return `app-${LogService.getTodayDateStr()}`;
-  }
-
-  /**
    * @description 解析某条归档流当前应写入的文件路径：按日期归档，若当天已有文件写满（超出体积上限）则自动滚动到下一个序号分片。
    * "运行日志"（prefix=app）与"数据审计日志"（prefix=audit）各自维护独立的活跃文件路径缓存与滚动序号。
    * @param {"app" | "audit"} prefix 归档流前缀

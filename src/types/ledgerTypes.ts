@@ -104,6 +104,10 @@ export interface LedgerItem {
   historicalFirstRecordDate?: string | null;
   /** 服务端预计算的该原料**全历史**最近一条逐日流水的日期（YYYY-MM-DD）；无任何流水时为 null/undefined。用于"最近一次录入是哪天"的准确提示 */
   historicalLastRecordDate?: string | null;
+  /** 服务端预计算的该原料严格早于本次查询 startDate 之前的历史累计入库总量，用于正向递推区间首日期初库存 */
+  priorIn?: number;
+  /** 服务端预计算的该原料严格早于本次查询 startDate 之前的历史累计出库总量，用于正向递推区间首日期初库存 */
+  priorOut?: number;
   /** 每日出入库及明细记录，以 YYYY-MM-DD 为 Key 进行索引 */
   dailyRecords: Record<string, DailyStockRecord>;
 }

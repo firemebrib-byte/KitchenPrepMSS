@@ -173,8 +173,8 @@ describe("LedgerStyle2Flow", () => {
       />
     );
 
-    expect(screen.getByText("5")).toBeInTheDocument();
-    expect(screen.getAllByText("8")).toHaveLength(2);
+    expect(screen.getByText("5斤")).toBeInTheDocument();
+    expect(screen.getAllByText("8斤")).toHaveLength(2);
   });
 
   it("calls setStyle2StartDate/setStyle2EndDate when the date range filter inputs change", async () => {

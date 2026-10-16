@@ -10,7 +10,6 @@
 import {
   Play,
   Check,
-  X,
   Save,
   Download,
   Printer,
@@ -35,8 +34,6 @@ interface LedgerControlBarProps {
   setBatchOutHandler: (val: string) => void;
   batchOutRecipient: string;
   setBatchOutRecipient: (val: string) => void;
-  setSaveToast: (val: string | null) => void;
-  triggerError: (msg: string) => void;
   handleStartRecording: () => void;
   handleConfirmRecording: () => void;
   handleCancelRecording: () => void;
@@ -46,7 +43,10 @@ interface LedgerControlBarProps {
   triggerPrintDoc: (type: "in" | "out") => void;
   setPrintModalOpen: (val: boolean) => void;
   setPrintPreviewStyle: (style: "style1" | "style2" | "style3" | null) => void;
-  activeLedgerId: string;
+  /** 当前录入/查看的日期 (YYYY-MM-DD)，显示在录入按钮与状态提示上，让用户明确感知在录哪天的账 */
+  selectedDate: string;
+  /** selectedDate 是否等于系统今天：为 false 时按钮与提示转琥珀色警示，防止把往日误当今天录入 */
+  isSelectedDateToday: boolean;
 }
 
 export function LedgerControlBar({
@@ -65,8 +65,6 @@ export function LedgerControlBar({
   setBatchOutHandler,
   batchOutRecipient,
   setBatchOutRecipient,
-  setSaveToast,
-  triggerError,
   handleStartRecording,
   handleConfirmRecording,
   handleCancelRecording,
@@ -76,7 +74,8 @@ export function LedgerControlBar({
   triggerPrintDoc,
   setPrintModalOpen,
   setPrintPreviewStyle,
-  activeLedgerId
+  selectedDate,
+  isSelectedDateToday
 }: LedgerControlBarProps) {
   return (
     <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 flex flex-col gap-2 shrink-0 font-sans">
@@ -111,7 +110,7 @@ export function LedgerControlBar({
             isRecordingMode ? (
               <span className="flex items-center gap-1.5 text-rose-500 font-semibold animate-pulse">
                 <span className="w-1.5 h-1.5 bg-rose-500 rounded-full"></span>
-                台账录入编辑模式开启中，请记得同步保存
+                正在录入 <strong className="underline underline-offset-2">{selectedDate}</strong>{!isSelectedDateToday && <strong className="text-amber-600">（非今天，请确认日期）</strong>} 的台账，请记得保存
               </span>
             ) : "双击单元格或点击编辑可修改，台账实时自动同步服务器"
           ) : "当日出入库单的集中归集、签字登记和打印单据"}
@@ -154,11 +153,20 @@ export function LedgerControlBar({
                 <>
                   <button
                     onClick={handleStartRecording}
-                    className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-[13px] font-black rounded-lg cursor-pointer transition-all shadow-md shadow-emerald-50 hover:scale-[1.02]"
-                    title="开启今日数据记账"
+                    className={`flex items-center gap-1.5 px-4 py-1.5 text-white text-[13px] font-black rounded-lg cursor-pointer transition-all shadow-md hover:scale-[1.02] ${
+                      isSelectedDateToday
+                        ? "bg-emerald-600 hover:bg-emerald-500 shadow-emerald-50"
+                        : "bg-amber-500 hover:bg-amber-400 shadow-amber-100"
+                    }`}
+                    title={`开启 ${selectedDate} 的台账数据录入`}
                   >
-                    <Play size={13} fill="currentColor" />
-                    <span>开启今日录入</span>
+                    <Play size={13} fill="currentColor" className="shrink-0" />
+                    <span className="flex flex-col items-start leading-tight">
+                      <span>开启当日录入</span>
+                      <span className="text-[10px] font-bold opacity-90">
+                        {selectedDate}{isSelectedDateToday ? "（今天）" : "（非今天！）"}
+                      </span>
+                    </span>
                   </button>
 
                   <button 
@@ -191,11 +199,20 @@ export function LedgerControlBar({
                 <>
                   <button
                     onClick={handleConfirmRecording}
-                    className="flex items-center gap-1.5 px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white text-[13px] font-black rounded-lg cursor-pointer transition-all shadow-md shadow-teal-50 hover:scale-[1.02]"
-                    title="保存今日修改"
+                    className={`flex items-center gap-1.5 px-4 py-1.5 text-white text-[13px] font-black rounded-lg cursor-pointer transition-all shadow-md hover:scale-[1.02] ${
+                      isSelectedDateToday
+                        ? "bg-teal-600 hover:bg-teal-500 shadow-teal-50"
+                        : "bg-amber-600 hover:bg-amber-500 shadow-amber-100"
+                    }`}
+                    title={`保存并同步 ${selectedDate} 的采购录入`}
                   >
-                    <Check size={13} className="stroke-[3]" />
-                    <span>保存并同步今日采购</span>
+                    <Check size={13} className="stroke-[3] shrink-0" />
+                    <span className="flex flex-col items-start leading-tight">
+                      <span>保存并同步采购</span>
+                      <span className="text-[10px] font-bold opacity-90">
+                        {selectedDate}{isSelectedDateToday ? "（今天）" : "（非今天！）"}
+                      </span>
+                    </span>
                   </button>
                   <button
                     onClick={handleCancelRecording}

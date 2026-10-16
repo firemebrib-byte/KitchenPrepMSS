@@ -15,7 +15,6 @@ import { SearchableSelect } from "../shared/SearchableSelect.tsx";
 import { RawMaterialsDictService } from "../../services/rawMaterialDict.ts";
 import { PrepReportService } from "../../services/store.ts";
 import { LEDGER_HEADERS } from "../../constants/ledgerConstants.ts";
-import { FoodCategory } from "../../types/types.ts";
 import { resolveLedgerItemCategory, UNCATEGORIZED_CATEGORY_KEY, UNCATEGORIZED_CATEGORY_LABEL } from "../../constants/constants.ts";
 import { HelperSelect } from "../shared/HelperSelect.tsx";
 import { SensorySelector } from "../shared/SensorySelector.tsx";
@@ -300,7 +299,7 @@ export function LedgerStyle1Table({
               {currentLedgerItems.length === 0 ? (
                 <tr>
                   <td colSpan={18} className="text-center py-12 text-slate-400 italic">
-                    该台账暂无采购原料。请点击左上方“开启今日录入”进入录入模式，选择字典中的原料并填写数据即可自动添加。
+                    该台账暂无采购原料。请点击左上方“开启当日录入”进入录入模式，选择字典中的原料并填写数据即可自动添加。
                   </td>
                 </tr>
               ) : filteredLedgerItems.length === 0 ? (
@@ -311,7 +310,7 @@ export function LedgerStyle1Table({
                       <span>
                         {hasActiveFilters
                           ? "未找到符合筛选条件的原料，请调整条件后重试。"
-                          : "当前所选同步日期暂无任何原料的出入库记录。"}
+                          : "当前所选录入日期暂无任何原料的出入库记录。"}
                       </span>
                     </div>
                   </td>

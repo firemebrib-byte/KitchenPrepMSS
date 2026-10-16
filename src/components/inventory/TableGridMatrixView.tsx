@@ -12,7 +12,6 @@ import { FoodCategory, PreparedItem } from "../../types/types.ts";
 import { PrepReportService } from "../../services/store.ts";
 import { RawMaterialsDictService } from "../../services/rawMaterialDict.ts";
 import { getItemMonthlySummary } from "../../utils.ts";
-import type { ThemeStyle } from "../../hooks/useTableTheme.ts";
 
 /**
  * @description TableGridMatrixView 组件入参接口
@@ -24,8 +23,6 @@ interface TableGridMatrixViewProps {
   filteredItems: PreparedItem[];
   /** 每个日期(1-31号)在该类目下的总开销汇总 */
   dayTotals: Record<string, number>;
-  /** 当前主题对应的完整样式类名映射 */
-  activeTheme: ThemeStyle;
   /** 当前激活的食材二级分类 */
   selectedCategory: FoodCategory | null;
   /** 是否使用全新实线黑边绿底样式，为false则使用经典色块样式 */
@@ -39,7 +36,6 @@ export function TableGridMatrixView({
   days,
   filteredItems,
   dayTotals,
-  activeTheme,
   selectedCategory,
   useNewStyle = true
 }: TableGridMatrixViewProps) {

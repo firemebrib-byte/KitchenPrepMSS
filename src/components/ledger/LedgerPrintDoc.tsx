@@ -9,7 +9,7 @@
 
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Ledger, LedgerItem } from "../../types/ledgerTypes.ts";
+import { Ledger } from "../../types/ledgerTypes.ts";
 import { RawMaterialsDictService } from "../../services/rawMaterialDict.ts";
 import { AlertCircle } from "lucide-react";
 import { PrepReportService } from "../../services/store.ts";
@@ -210,8 +210,6 @@ function PrintOutDoc({
   customDataRows: number;
   customSupplierRows: number;
 }) {
-  const yearStr = selectedDate.split("-")[0];
-
   /**
    * @description 按食品大类对出库条目进行分组，并匹配对应的品类中文标签
    */

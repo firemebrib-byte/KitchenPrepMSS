@@ -112,7 +112,7 @@ export function useAppData(): UseAppDataResult {
       return data;
     });
 
-    Promise.all([p1, p2, p3]).then(([prepData, ledgerData, serverData]) => {
+    Promise.all([p1, p2, p3]).then(([, ledgerData, serverData]) => {
       reportProgress(10, "校验并装载全新主控交互面板...");
 
       // 延迟 400ms 解除，避免一闪而过的尴尬，让进度条 100% 的视觉体验最大化

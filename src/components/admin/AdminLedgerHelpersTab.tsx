@@ -16,7 +16,7 @@ import { Plus, Trash2, ShieldCheck, HelpCircle } from "lucide-react";
  */
 export const AdminLedgerHelpersTab: React.FC = () => {
   // --- 触发组件局部重绘的状态 ---
-  const [tick, setTick] = useState(0);
+  const [, setTick] = useState(0);
 
   // --- 每个列表的输入框状态 ---
   const [inputs, setInputs] = useState({

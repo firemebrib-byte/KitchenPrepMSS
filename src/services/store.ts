@@ -9,8 +9,7 @@
  * 现在只负责 activeGroups/activeCategories 两份一二级配置的增删改查，不再管理任何"报表"。
  */
 
-import { RawMaterialsDictService } from "./rawMaterialDict.ts";
-import { FoodCategory, DynamicGroup, DynamicCategory } from "../types/types.ts";
+import { DynamicGroup, DynamicCategory } from "../types/types.ts";
 import { LogBroker } from "../utils.ts";
 import { SyncHelper } from "./syncHelper.ts";
 

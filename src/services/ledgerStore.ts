@@ -10,9 +10,6 @@
 import { Ledger, LedgerItem, DailyStockRecord } from "../types/ledgerTypes.ts";
 import { LogBroker } from "../utils.ts";
 import { SyncHelper } from "./syncHelper.ts";
-import { PrepReportService } from "./store.ts";
-import { RawMaterialsDictService } from "./rawMaterialDict.ts";
-import { FoodCategory } from "../types/types.ts";
 
 /** 模拟接口响应延迟 */
 const LEDGER_API_LATENCY = 100;
@@ -342,35 +339,6 @@ export class LedgerService {
   }
 
   /**
-   * @description 通过台账ID、原料品名及日期主键，更新写入台账指定日期的入库指标数据，用于反向数据绑定
-   * @param ledgerId 台账ID
-   * @param itemName 原料名称
-   * @param dateStr 日期 (格式 "YYYY-MM-DD")
-   * @param fields 入库记录参数
-   */
-  public static async updateDailyRecordByKey(
-    ledgerId: string,
-    itemName: string,
-    dateStr: string,
-    fields: Partial<DailyStockRecord>
-  ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      try {
-        const item = this.ledgerItems.find((i) => i.ledgerId === ledgerId && i.name === itemName);
-        if (!item) {
-          reject(new Error(`未在台账 [${ledgerId}] 中找到名为 [${itemName}] 的采购项目`));
-          return;
-        }
-        this.updateDailyRecord(item.id, dateStr, fields)
-          .then(() => resolve())
-          .catch((err) => reject(err));
-      } catch (err) {
-        reject(err);
-      }
-    });
-  }
-
-  /**
    * @description 录入/更新指定原料在指定日期的部分出入库或台账字段，采用 Partial 合并技术实现顺畅的 onBlur 自动保存，并自动重算库存
    * @param itemId 原料ID
    * @param dateStr 选中的日期 (格式如 "YYYY-MM-DD")
@@ -448,7 +416,6 @@ export class LedgerService {
     }
 
     const updatedItems: LedgerItem[] = body.updatedItems;
-    const mergedRecords: Record<string, DailyStockRecord> = body.mergedRecords;
 
     // 批量更新内存缓存：同 updateDailyRecord，按天合并，保留前端已加载的其它日期数据
     const newLedgerItems = [...this.ledgerItems];

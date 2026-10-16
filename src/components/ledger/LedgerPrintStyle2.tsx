@@ -8,7 +8,6 @@
  */
 
 import { Ledger, LedgerItem } from "../../types/ledgerTypes.ts";
-import { FoodCategory } from "../../types/types.ts";
 import { LEDGER_PRINT_STYLE2_CONFIG } from "../../constants/ledgerConstants.ts";
 import { RawMaterialsDictService } from "../../services/rawMaterialDict.ts";
 import { computeLedgerDailyStockBalances } from "../../utils.ts";
@@ -71,7 +70,7 @@ export function LedgerPrintStyle2({
 
   // 提取有记录的供货商作为本单打印头部显示
   const sampleRecord = Object.entries(activeItem.dailyRecords).find(
-    ([d, rec]) => rec.supplier || rec.certification
+    ([, rec]) => rec.supplier || rec.certification
   )?.[1] || { supplier: "", certification: "" };
 
   const recordForSelectedDate = activeItem.dailyRecords[selectedDate] || ({} as any);

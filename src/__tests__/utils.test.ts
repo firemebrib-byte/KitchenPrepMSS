@@ -158,6 +158,8 @@ describe("computeLedgerDailyStockBalances", () => {
     currentStock: overrides.currentStock ?? 0,
     historicalTotalIn: overrides.historicalTotalIn,
     historicalTotalOut: overrides.historicalTotalOut,
+    priorIn: overrides.priorIn,
+    priorOut: overrides.priorOut,
     dailyRecords: overrides.dailyRecords || {}
   });
 
@@ -196,6 +198,29 @@ describe("computeLedgerDailyStockBalances", () => {
     expect(balances["2026-07-01"]).toBe(7); // 2 + 5
     expect(balances["2026-07-02"]).toBe(7); // 7 + 3 - 3
     expect(balances["2026-07-03"]).toBe(7);
+  });
+
+  it("does not pollute past months balances when future months have inward records", () => {
+    // 模拟本 bug 真实场景：
+    // 8-28 首次入库 250 斤，9 月消耗若干，11-02 预录入库 300 斤。
+    // 在查看 8 月时，priorIn=0, priorOut=0。8-01 到 8-27 库存应为 0，8-28 变为 250，绝不能在 8-28 之前出现 300。
+    const item = makeItem({
+      initialStock: 0,
+      priorIn: 0,
+      priorOut: 0,
+      historicalTotalIn: 550, // 250 + 300
+      historicalTotalOut: 0,
+      dailyRecords: {
+        "2026-08-28": { inQuantity: 250, inPrice: 3.3, inAmount: 825, outQuantity: 0 }
+      }
+    });
+    const dates = getDatesBetween("2026-08-01", "2026-08-29");
+    const balances = computeLedgerDailyStockBalances(item, dates);
+
+    expect(balances["2026-08-01"]).toBe(0);
+    expect(balances["2026-08-27"]).toBe(0);
+    expect(balances["2026-08-28"]).toBe(250);
+    expect(balances["2026-08-29"]).toBe(250);
   });
 });
 

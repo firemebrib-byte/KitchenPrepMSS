@@ -7,12 +7,11 @@
  * @description 原料购销台账及库存仓储系统主面板组件：编排台账的筛选、样式一/样式二切换、录入模式、原料增删改、批量签字与打印导出等各子组件；数据加载与录入模式状态机已分别抽取到 useLedgerData/useLedgerRecording 两个自定义 Hook 中。
  */
 
-import React, { useEffect, useState, useMemo, lazy, Suspense } from "react";
-import { Ledger, LedgerItem, DailyStockRecord, LedgerSortField, LedgerSortOrder } from "../../types/ledgerTypes.ts";
+import React, { useEffect, useState, useMemo } from "react";
+import { LedgerItem, DailyStockRecord, LedgerSortField, LedgerSortOrder } from "../../types/ledgerTypes.ts";
 import { LedgerService } from "../../services/ledgerStore.ts";
-import { LEDGER_UI_TEXT, LEDGER_HEADERS, LEDGER_PRINT_OUT_CONFIG, LEDGER_PRINT_STYLE1_CONFIG } from "../../constants/ledgerConstants.ts";
+import { LEDGER_UI_TEXT, LEDGER_PRINT_OUT_CONFIG, LEDGER_PRINT_STYLE1_CONFIG } from "../../constants/ledgerConstants.ts";
 import { LogBroker, matchPinyin, getDatesBetween, computeLedgerDailyStockBalances } from "../../utils.ts";
-import { SearchableSelect } from "../shared/SearchableSelect.tsx";
 import { RawMaterialsDictService } from "../../services/rawMaterialDict.ts";
 import { FoodCategory } from "../../types/types.ts";
 import { resolveLedgerItemCategory, UNCATEGORIZED_CATEGORY_KEY } from "../../constants/constants.ts";
@@ -64,6 +63,13 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
 
   const selectedDate = props.selectedDate || internalSelectedDate;
   const setSelectedDate = props.onDateChange || setInternalSelectedDate;
+
+  /** 系统当前真实日期 (YYYY-MM-DD)，用于提示用户所选录入日期是否为“今天”，避免把往日的账误当今天录入 */
+  const todayStr = (() => {
+    const t = new Date();
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+  })();
+  const isSelectedDateToday = selectedDate === todayStr;
 
   /** 样式二（单原料日流水）自定义时间段 - 开始日期 */
   const [style2StartDate, setStyle2StartDate] = useState<string>("");
@@ -296,7 +302,7 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
   };
 
   /**
-   * @description 开启今日录入前，自动切换回总表模式（图一），确保录入时始终能看到完整的原料清单
+   * @description 开启当日录入前，自动切换回总表模式（图一），确保录入时始终能看到完整的原料清单
    */
   const handleStartRecording = () => {
     setLedgerStyle("style1");
@@ -693,34 +699,47 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
       return;
     }
 
-    const promises: Promise<void>[] = [];
+    const handler = batchOutHandler.trim();
+    const recipient = batchOutRecipient.trim();
+    if (!handler && !recipient) {
+      triggerError("请先填写出库人或接收人姓名，再点击一键应用。");
+      return;
+    }
 
-    // 对有变动的原料项目执行批量浅合并写入
+    // 汇总成一次批量提交（键为 itemId），只带 outHandler / outRecipient 两个字段，
+    // 服务端按当天做字段级浅合并，不会动该日已有的数量/单价/供货商/索证等其它字段。
+    // 用批量接口而非逐项并发 PUT：一次请求 = 一次版本校验，避免多个并发写共用同一过期版本号相互撞 409；
+    // 且整批走单个事务，要么全写要么全不写，不会出现“签了一半”的中间态。
+    const batchUpdates: Record<string, Partial<DailyStockRecord>> = {};
     currentLedgerItems.forEach((item) => {
       const record = item.dailyRecords[selectedDate];
       if (record && (record.inQuantity > 0 || record.outQuantity > 0)) {
         const fieldsToUpdate: Partial<DailyStockRecord> = {};
-        if (batchOutHandler.trim()) {
-          fieldsToUpdate.outHandler = batchOutHandler.trim();
-        }
-        if (batchOutRecipient.trim()) {
-          fieldsToUpdate.outRecipient = batchOutRecipient.trim();
-        }
-
-        if (Object.keys(fieldsToUpdate).length > 0) {
-          promises.push(LedgerService.updateDailyRecord(item.id, selectedDate, fieldsToUpdate));
-        }
+        if (handler) fieldsToUpdate.outHandler = handler;
+        if (recipient) fieldsToUpdate.outRecipient = recipient;
+        batchUpdates[item.id] = fieldsToUpdate;
       }
     });
 
-    Promise.all(promises)
+    if (Object.keys(batchUpdates).length === 0) {
+      triggerError("当前所选日期没有需要填写签字的出入库记录。");
+      return;
+    }
+
+    LedgerService.updateDailyRecordsBatch(selectedDate, batchUpdates)
       .then(() => {
         triggerSaveToast();
         setBatchOutHandler("");
         setBatchOutRecipient("");
-        LogBroker.publish("INFO", "LedgerSystem", `批量填报今日签字：出库/发料人设定为「${batchOutHandler}」，接收/领料人设定为「${batchOutRecipient}」`);
+        LogBroker.publish("INFO", "LedgerSystem", `批量填报 ${selectedDate} 签字：出库/发料人「${handler}」，接收/领料人「${recipient}」，共 ${Object.keys(batchUpdates).length} 项`);
       })
-      .catch((err) => triggerError("批量应用签字时发生异常: " + err.message));
+      .catch((err) => {
+        const raw = err instanceof Error ? err.message : String(err);
+        const msg = raw === "VERSION_CONFLICT"
+          ? "台账数据已被其它页面或设备更新，请刷新页面获取最新数据后再重试。"
+          : `批量应用签字失败：${raw}`;
+        triggerError(msg);
+      });
   };
 
   // ================= 导出与打印核心逻辑 =================
@@ -855,10 +874,14 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            {/* 日期选择器 */}
-            <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 w-fit">
-              <Calendar size={13} className="text-slate-500" />
-              <span className="text-[12px] text-slate-500 font-medium">同步日期：</span>
+            {/* 日期选择器：非“今天”时整体转琥珀色并显式标注，避免把往日的账误当今天录入 */}
+            <div
+              className={`flex items-center gap-2 border rounded-lg px-2.5 py-1.5 w-fit transition-colors ${
+                isSelectedDateToday ? "bg-slate-50 border-slate-200" : "bg-amber-50 border-amber-300"
+              }`}
+            >
+              <Calendar size={13} className={isSelectedDateToday ? "text-slate-500" : "text-amber-600"} />
+              <span className={`text-[12px] font-medium ${isSelectedDateToday ? "text-slate-500" : "text-amber-700"}`}>录入日期：</span>
               <input
                 type="date"
                 value={selectedDate}
@@ -866,8 +889,15 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
                   setSelectedDate(e.target.value);
                   LogBroker.publish("INFO", "LedgerSystem", `切换台账数据录入日期为: ${e.target.value}`);
                 }}
-                className="bg-transparent text-[12px] font-bold text-slate-700 outline-none cursor-pointer text-[13px]"
+                className={`bg-transparent text-[13px] font-bold outline-none cursor-pointer ${isSelectedDateToday ? "text-slate-700" : "text-amber-800"}`}
               />
+              <span
+                className={`text-[11px] font-black px-1.5 py-0.5 rounded shrink-0 ${
+                  isSelectedDateToday ? "bg-emerald-100 text-emerald-700" : "bg-amber-500 text-white"
+                }`}
+              >
+                {isSelectedDateToday ? "今天" : "非今天"}
+              </span>
             </div>
           </div>
         </div>
@@ -878,7 +908,7 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
             <div className="flex items-center gap-2">
               <Calendar size={14} className="shrink-0" />
               <span>
-                当前所选同步日期（<strong>{selectedDate}</strong>）在本台账下暂无出入库记录，本台账最近一次录入记录的日期为 <strong>{nearestRecordDateHint}</strong>，并非数据丢失，你可以切换日期查看。
+                当前所选录入日期（<strong>{selectedDate}</strong>）在本台账下暂无出入库记录，本台账最近一次录入记录的日期为 <strong>{nearestRecordDateHint}</strong>，并非数据丢失，你可以切换日期查看。
               </span>
             </div>
             <button
@@ -918,8 +948,6 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
           setBatchOutHandler={setBatchOutHandler}
           batchOutRecipient={batchOutRecipient}
           setBatchOutRecipient={setBatchOutRecipient}
-          setSaveToast={setSaveToast}
-          triggerError={triggerError}
           handleStartRecording={handleStartRecording}
           handleConfirmRecording={handleConfirmRecording}
           handleCancelRecording={handleCancelRecording}
@@ -929,7 +957,8 @@ export function LedgerSystem(props: LedgerSystemProps = {}) {
           setPrintModalOpen={handleTogglePrintModal}
           setPrintPreviewStyle={setPrintPreviewStyle}
           triggerPrintDoc={triggerPrintDoc}
-          activeLedgerId={activeLedgerId}
+          selectedDate={selectedDate}
+          isSelectedDateToday={isSelectedDateToday}
         />
 
         {/* 主体工作区 */}

@@ -8,8 +8,7 @@
  */
 
 import { useEffect, useState, useMemo, lazy, Suspense } from "react";
-import { FoodCategory, TargetGroup } from "./types/types.ts";
-import { PrepReportService } from "./services/store.ts";
+import { FoodCategory } from "./types/types.ts";
 import { TableGrid } from "./components/inventory/TableGrid.tsx";
 import { LogBroker, computeLedgerDailyAmountsByGroup, computeLedgerHistoricalInAmount } from "./utils.ts";
 import { ErrorBoundary } from "./components/shared/ErrorBoundary.tsx";
@@ -24,9 +23,6 @@ import {
   Settings,
   RefreshCw,
   ShieldAlert,
-  FolderDown,
-  FolderUp,
-  Database,
   LogOut,
   Lock,
   Menu,
@@ -171,17 +167,6 @@ export default function App() {
   }, [activeGroupsList]);
 
   /**
-   * @description 动态生成一级人群的外观展示表情映射字典
-   */
-  const dynamicGroupEmojis = useMemo(() => {
-    const map: Record<string, string> = {};
-    activeGroupsList.forEach((g) => {
-      map[g.key] = g.emoji;
-    });
-    return map;
-  }, [activeGroupsList]);
-
-  /**
    * @description 动态生成品类分类的中文名映射字典
    */
   const dynamicCategoryLabels = useMemo(() => {
@@ -207,15 +192,6 @@ export default function App() {
     const sum = Object.values(dailyAmounts).reduce((a, b) => a + b, 0);
     return Math.round(sum * 100) / 100;
   }, [activeGroup, selectedYear, selectedMonth, ledgerItemsList]);
-
-  /**
-   * @description 计算食堂所有受众人群全品类在全月的累积费用总支出（宏观总额）。求和逻辑同上，不按人群过滤。
-   */
-  const allGroupsReportTotal = useMemo(() => {
-    const dailyAmounts = computeLedgerDailyAmountsByGroup(ledgerItemsList, null, selectedYear, selectedMonth);
-    const sum = Object.values(dailyAmounts).reduce((a, b) => a + b, 0);
-    return Math.round(sum * 100) / 100;
-  }, [selectedYear, selectedMonth, ledgerItemsList]);
 
   /**
    * @description 计算原料购销台账所有原料的累计入库总额 (全账期)。

@@ -92,13 +92,16 @@ export function computeLedgerTrueCurrentStock(item: LedgerItem): number {
 /**
  * @description 计算单个台账原料项在给定连续日期区间内“每一天的当日结余库存”。
  *
- * 结余口径锚定在 computeLedgerTrueCurrentStock() 返回的“真实当前库存”上：区间最后一天的结余恒等于
- * 真实当前库存，更早的日期按区间内每天的出入库变动逐日反推。因此无论选择哪个时间段展示或打印，都不会
- * 因为区间外（尤其是更早月份）的入库/出库被按月懒加载排除在 dailyRecords 之外，而算出错误（甚至为负）
- * 的库存。例如某原料 8 月入库 250 斤、9 月仅出库若干斤，切到 9 月查看时最后一天仍显示真实剩余库存，
- * 而不是把 8 月的入库丢掉后得到的负数。
+ * 结余计算采用正向递推机制：
+ * 1. 优先使用服务端预聚合的 priorIn / priorOut（严格早于区间首日的所有历史累计入库与出库），
+ *    推算出区间首日开账时的真实期初库存：initialStock + priorIn - priorOut；
+ * 2. 从区间第一天开始，顺次遍历每一天：当日结余 = 前日结余 + 当日入库 - 当日出库；
+ * 3. 这种正向累加机制彻底避免了过去“用包含未来的全历史总库存向后反推”时，因未来月份录入了入库单而导致
+ *    早前月份（如 8 月~10 月）被提前倒灌多出库存的 Bug；
+ * 4. 兜底保护：当服务端未提供 priorIn/priorOut（如离线单测或静态模式）时，自动从内存中早于区间首日的
+ *    dailyRecords 汇总期初；若内存中仅有当前区间且区间末尾等于最新记录时，平滑降级兼容。
  *
- * @param item 台账原料项（需含 dailyRecords，理想情况下含 historicalTotalIn/Out）
+ * @param item 台账原料项（需含 dailyRecords，理想情况下含 priorIn/priorOut 或 historicalTotalIn/Out）
  * @param dates 升序排列的连续日期字符串数组（YYYY-MM-DD），通常由 getDatesBetween() 生成
  * @returns 以日期字符串为键、当日结余库存为值的 Record
  */
@@ -107,26 +110,66 @@ export function computeLedgerDailyStockBalances(
   dates: string[]
 ): Record<string, number> {
   const balances: Record<string, number> = {};
-  const trueCurrentStock = computeLedgerTrueCurrentStock(item);
+  if (!dates || dates.length === 0) return balances;
 
-  // 区间内的出入库净变动合计
-  let windowIn = 0;
-  let windowOut = 0;
-  dates.forEach((d) => {
-    const r = item.dailyRecords?.[d];
-    if (r) {
-      windowIn += r.inQuantity || 0;
-      windowOut += r.outQuantity || 0;
+  const firstDate = dates[0];
+  const initial = item.initialStock || 0;
+
+  // 1. 计算区间首日之前的期初累计入库和出库
+  let priorIn = 0;
+  let priorOut = 0;
+
+  if (
+    typeof item.priorIn === "number" && Number.isFinite(item.priorIn) &&
+    typeof item.priorOut === "number" && Number.isFinite(item.priorOut)
+  ) {
+    // 优先：服务端针对本次查询返回了精确的区间前累计
+    priorIn = item.priorIn;
+    priorOut = item.priorOut;
+  } else {
+    // 兜底方案 A：检查内存中是否存在早于 firstDate 的记录
+    const records = item.dailyRecords || {};
+    let hasEarlierRecordsInMem = false;
+    let memPriorIn = 0;
+    let memPriorOut = 0;
+
+    for (const [d, r] of Object.entries(records)) {
+      if (d < firstDate && r) {
+        hasEarlierRecordsInMem = true;
+        memPriorIn += r.inQuantity || 0;
+        memPriorOut += r.outQuantity || 0;
+      }
     }
-  });
 
-  // 反推“区间第一天之前”的期初结余：真实当前库存 − 区间净入库 + 区间净出库
-  let accum = Math.round((trueCurrentStock - windowIn + windowOut) * 100) / 100;
-  dates.forEach((dateStr) => {
+    if (hasEarlierRecordsInMem) {
+      priorIn = memPriorIn;
+      priorOut = memPriorOut;
+    } else if (
+      typeof item.historicalTotalIn === "number" && Number.isFinite(item.historicalTotalIn) &&
+      typeof item.historicalTotalOut === "number" && Number.isFinite(item.historicalTotalOut)
+    ) {
+      // 兜底方案 B（单测或特殊离线模式）：只有全历史累计总量且内存里没有更早数据时，
+      // 扣除区间内以及区间后的变动反推期初
+      let windowAndPostIn = 0;
+      let windowAndPostOut = 0;
+      for (const [d, r] of Object.entries(records)) {
+        if (d >= firstDate && r) {
+          windowAndPostIn += r.inQuantity || 0;
+          windowAndPostOut += r.outQuantity || 0;
+        }
+      }
+      priorIn = Math.max(0, Math.round((item.historicalTotalIn - windowAndPostIn) * 100) / 100);
+      priorOut = Math.max(0, Math.round((item.historicalTotalOut - windowAndPostOut) * 100) / 100);
+    }
+  }
+
+  // 2. 正向递推每一天的当日库存
+  let accum = Math.round((initial + priorIn - priorOut) * 100) / 100;
+  for (const dateStr of dates) {
     const r = item.dailyRecords?.[dateStr];
     accum = accum + (r?.inQuantity || 0) - (r?.outQuantity || 0);
     balances[dateStr] = Math.round(accum * 100) / 100;
-  });
+  }
 
   return balances;
 }

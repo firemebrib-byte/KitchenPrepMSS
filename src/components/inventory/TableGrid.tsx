@@ -13,9 +13,7 @@ import { PrepReportService } from "../../services/store.ts";
 import { UI_TEXT, resolveLedgerItemCategory, UNCATEGORIZED_CATEGORY_KEY, UNCATEGORIZED_CATEGORY_LABEL } from "../../constants/constants.ts";
 import { getDaysInMonth, LogBroker, matchPinyin, convertItemsToCsv, computeLedgerDailyAmountsByGroup } from "../../utils.ts";
 import { Grid, Search, CalendarDays, Check, Flame, Download, TrendingUp } from "lucide-react";
-import { SearchableSelect } from "../shared/SearchableSelect.tsx";
 import { RawMaterialsDictService } from "../../services/rawMaterialDict.ts";
-import { LedgerService } from "../../services/ledgerStore.ts";
 import { useTableTheme } from "../../hooks/useTableTheme.ts";
 import { TableGridMatrixView } from "./TableGridMatrixView.tsx";
 import { TableGridFocusView } from "./TableGridFocusView.tsx";
@@ -55,7 +53,7 @@ export const TableGrid: React.FC<TableGridProps> = ({
   const [viewMode, setViewMode] = useState<"MATRIX" | "FOCUS">("MATRIX");
 
   // 主题样式管理，统一由 useTableTheme 提供
-  const { theme, activeTheme, handleThemeChange } = useTableTheme();
+  const { activeTheme } = useTableTheme();
 
   // 新旧样式切换开关
   const [useNewStyle, setUseNewStyle] = useState<boolean>(true);
@@ -395,7 +393,6 @@ export const TableGrid: React.FC<TableGridProps> = ({
               days={days}
               filteredItems={filteredItems}
               dayTotals={dayTotals}
-              activeTheme={activeTheme}
               selectedCategory={selectedCategory}
               useNewStyle={useNewStyle}
             />

@@ -14,12 +14,10 @@
 
 import path from "path";
 import fs from "fs";
-import crypto from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
 import Database from "better-sqlite3";
 import COS from "cos-nodejs-sdk-v5";
-// Constants previously here were removed
-import { FoodCategory, TargetGroup, DynamicGroup, DynamicCategory } from "../src/types/types.ts";
+import { FoodCategory, DynamicGroup, DynamicCategory } from "../src/types/types.ts";
 import { Ledger, LedgerItem, DailyStockRecord } from "../src/types/ledgerTypes.ts";
 import { RawMaterialsDictService, RawMaterialDictItem } from "../src/services/rawMaterialDict.ts";
 import { LogService } from "./logService.ts";
@@ -459,9 +457,6 @@ export class StorageService {
    * @returns {any} 全量的后端存储快照格式数据
    */
   private static generateDefaultSeeds(): any {
-    const currentYear = new Date().getFullYear();
-    const currentMonth = new Date().getMonth() + 1;
-
     // 1. active_groups
     const activeGroups: DynamicGroup[] = [
       { key: "KID", label: "幼儿", emoji: "👶", isDefault: true },
@@ -1092,25 +1087,6 @@ export class StorageService {
 
     const ledgers = db.prepare("SELECT id, name, created_at as createdAt FROM ledgers").all();
 
-    // currentStock 一律由 initialStock + 全历史入库累计 − 全历史出库累计 现算，不读 li.current_stock 存量列：
-    // 存量列的维护历来只按“写操作发生当时前端加载的月份区间”重算，跨月编辑会写歪；这里以逐日流水表的无条件
-    // SUM 为准，使 GET /load 返回的 currentStock 永远是真实库存，并自动修复任何历史写歪的存量值。
-    // historicalFirst/LastRecordDate 是对该原料**全部**逐日流水（无日期过滤）的 MIN/MAX(date)，
-    // 供前端在按月懒加载、内存里只有部分月份数据时，仍能准确判断"这本台账最近一次录入是哪天"，
-    // 避免出现"明明 8-28 有记录却提示最近是 9-23"这类因视野不全导致的误报。
-    const ledgerItemsRaw = db.prepare(`
-      SELECT li.id, li.ledger_id as ledgerId, li.name, li.unit, li.spec, li.category, li.initial_stock as initialStock,
-             (li.initial_stock + COALESCE(SUM(dr.in_quantity), 0) - COALESCE(SUM(dr.out_quantity), 0)) as currentStock,
-             COALESCE(SUM(dr.in_quantity), 0) as historicalTotalIn,
-             COALESCE(SUM(dr.out_quantity), 0) as historicalTotalOut,
-             COALESCE(SUM(dr.in_amount), 0) as historicalTotalInAmount,
-             MIN(dr.date) as historicalFirstRecordDate,
-             MAX(dr.date) as historicalLastRecordDate
-      FROM ledger_items li
-      LEFT JOIN ledger_item_daily_records dr ON li.id = dr.item_id
-      GROUP BY li.id
-    `).all() as any[];
-
     let filterStart = startDate;
     let filterEnd = endDate;
     if (!filterStart || !filterEnd) {
@@ -1120,6 +1096,29 @@ export class StorageService {
       filterStart = `${y}-${m}-01`;
       filterEnd = `${y}-${m}-${new Date(y, now.getMonth() + 1, 0).getDate()}`;
     }
+
+    // currentStock 一律由 initialStock + 全历史入库累计 − 全历史出库累计 现算，不读 li.current_stock 存量列：
+    // 存量列的维护历来只按“写操作发生当时前端加载的月份区间”重算，跨月编辑会写歪；这里以逐日流水表的无条件
+    // SUM 为准，使 GET /load 返回的 currentStock 永远是真实库存，并自动修复任何历史写歪的存量值。
+    // historicalFirst/LastRecordDate 是对该原料**全部**逐日流水（无日期过滤）的 MIN/MAX(date)，
+    // 供前端在按月懒加载、内存里只有部分月份数据时，仍能准确判断"这本台账最近一次录入是哪天"，
+    // 避免出现"明明 8-28 有记录却提示最近是 9-23"这类因视野不全导致的误报。
+    // priorIn/priorOut 是对该原料严格早于 filterStart 之前日期的 SUM(in_quantity)/SUM(out_quantity)，
+    // 用于前端正向递推区间内每日结余库存，避免因未来月份存在入库反向倒扣而污染历史账期。
+    const ledgerItemsRaw = db.prepare(`
+      SELECT li.id, li.ledger_id as ledgerId, li.name, li.unit, li.spec, li.category, li.initial_stock as initialStock,
+             (li.initial_stock + COALESCE(SUM(dr.in_quantity), 0) - COALESCE(SUM(dr.out_quantity), 0)) as currentStock,
+             COALESCE(SUM(dr.in_quantity), 0) as historicalTotalIn,
+             COALESCE(SUM(dr.out_quantity), 0) as historicalTotalOut,
+             COALESCE(SUM(dr.in_amount), 0) as historicalTotalInAmount,
+             MIN(dr.date) as historicalFirstRecordDate,
+             MAX(dr.date) as historicalLastRecordDate,
+             COALESCE(SUM(CASE WHEN dr.date < ? THEN dr.in_quantity ELSE 0 END), 0) as priorIn,
+             COALESCE(SUM(CASE WHEN dr.date < ? THEN dr.out_quantity ELSE 0 END), 0) as priorOut
+      FROM ledger_items li
+      LEFT JOIN ledger_item_daily_records dr ON li.id = dr.item_id
+      GROUP BY li.id
+    `).all(filterStart, filterStart) as any[];
 
     let dailyRowsSql = `
       SELECT item_id as itemId, date, in_quantity as inQuantity, in_price as inPrice, in_amount as inAmount,
